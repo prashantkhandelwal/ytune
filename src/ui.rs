@@ -371,7 +371,7 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let width = area.width.saturating_sub(6).min(88);
-    let height = area.height.min(16);
+    let height = area.height.min(18);
     let popup = Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
@@ -379,22 +379,35 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
         height,
     );
     frame.render_widget(Clear, popup);
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT))
         .title(" Settings | Enter: save | Esc: cancel ");
+    if height < 14 {
+        block = block.title_bottom(Line::styled(
+            form.error
+                .as_deref()
+                .unwrap_or("Blank executable: automatic discovery"),
+            Style::default().fg(if form.error.is_some() {
+                Color::LightRed
+            } else {
+                Color::Gray
+            }),
+        ));
+    }
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let sections = Layout::vertical([Constraint::Length(9), Constraint::Min(1)]).split(inner);
+    let sections = Layout::vertical([Constraint::Length(11), Constraint::Min(0)]).split(inner);
     let columns =
         Layout::horizontal([Constraint::Length(20), Constraint::Min(1)]).split(sections[0]);
     let labels = [
         "yt-dlp executable",
+        "mpv executable",
         "Seek interval (s)",
         "Volume step (%)",
         "Data folder",
     ];
-    // Shared edges keep four bordered inputs visible in a 64 x 20 terminal.
+    // Shared edges keep five bordered inputs visible in a 64 x 20 terminal.
     for index in (0..labels.len())
         .filter(|&index| index != form.focus)
         .chain(std::iter::once(form.focus))
@@ -467,7 +480,7 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(
         Paragraph::new(form.error.as_deref().unwrap_or(
-            "Blank yt-dlp: auto. Seek > 0; volume 1-100. Folder changes copy data; yt-dlp changes stop playback.",
+            "Blank executable: auto. Seek > 0; volume 1-100. Folder changes copy data; executable changes stop playback.",
         )).wrap(Wrap { trim: true }).style(Style::default().fg(
             if form.error.is_some() { Color::LightRed } else { Color::Gray },
         )),
@@ -1209,6 +1222,7 @@ mod tests {
             for expected in [
                 " Settings ",
                 "yt-dlp executable",
+                "mpv executable",
                 "Seek interval",
                 "Volume step",
                 "Data folder",
@@ -1227,7 +1241,7 @@ mod tests {
             let footer_height = shortcut_lines(ShortcutMode::Settings, width - 2).len() as u16 + 2;
             let body_height = height - 3 - footer_height;
             let popup_x = (width - (width - 6).min(88)) / 2;
-            let popup_y = 3 + (body_height - body_height.min(16)) / 2;
+            let popup_y = 3 + (body_height - body_height.min(18)) / 2;
             let buffer = terminal.backend().buffer();
             assert_eq!(buffer[(popup_x, popup_y)].symbol(), "\u{250c}");
             assert_eq!(buffer[(popup_x, popup_y)].fg, ACCENT);
@@ -1261,6 +1275,7 @@ mod tests {
         ));
         app.settings_form.as_mut().unwrap().fields = [
             "C:\\yt-dlp.exe".into(),
+            "C:\\mpv.exe".into(),
             "25".into(),
             "7".into(),
             "C:\\Music".into(),
@@ -1272,15 +1287,16 @@ mod tests {
             let footer = shortcut_lines(ShortcutMode::Settings, width - 2).len() as u16 + 2;
             let body_height = height - 3 - footer;
             let popup_x = (width - (width - 6).min(88)) / 2;
-            let popup_y = 3 + (body_height - body_height.min(16)) / 2;
+            let popup_y = 3 + (body_height - body_height.min(18)) / 2;
             let label_x = popup_x + 1;
             let border_x = popup_x + 21;
             let value_x = border_x + 1;
             let first_row = popup_y + 2;
             let buffer = terminal.backend().buffer();
-            for (index, (label, value)) in [("y", "C"), ("S", "2"), ("V", "7"), ("D", "C")]
-                .iter()
-                .enumerate()
+            for (index, (label, value)) in
+                [("y", "C"), ("m", "C"), ("S", "2"), ("V", "7"), ("D", "C")]
+                    .iter()
+                    .enumerate()
             {
                 let y = first_row + index as u16 * 2;
                 assert_eq!(buffer[(label_x, y)].symbol(), *label);
@@ -1300,6 +1316,13 @@ mod tests {
             assert_eq!(buffer[(value_x, first_row)].bg, Color::Black);
             assert_eq!(buffer[(value_x, first_row + 2)].bg, Color::DarkGray);
             assert_eq!(buffer[(border_x, first_row + 1)].fg, ACCENT);
+            app.settings_form.as_mut().unwrap().focus = 4;
+            terminal.draw(|frame| draw(frame, &app))?;
+            let buffer = terminal.backend().buffer();
+            let last_row = first_row + 8;
+            assert_eq!(buffer[(value_x, last_row)].bg, Color::DarkGray);
+            assert_eq!(buffer[(border_x, last_row + 1)].symbol(), "\u{2514}");
+            assert_eq!(buffer[(border_x, last_row + 1)].fg, ACCENT);
         }
         Ok(())
     }

@@ -77,10 +77,11 @@ pub struct DeleteConfirmation {
 }
 
 pub struct SettingsForm {
-    pub fields: [String; 4],
+    pub fields: [String; 5],
     pub focus: usize,
     pub error: Option<String>,
     original_ytdlp: String,
+    original_mpv: String,
 }
 
 impl SettingsForm {
@@ -96,19 +97,28 @@ impl SettingsForm {
                     .context("yt-dlp executable was not found at the specified path")?,
             )
         };
+        let path = self.fields[1].trim();
+        let mpv_path = if self.fields[1] == self.original_mpv {
+            current.mpv_path.clone()
+        } else if path.is_empty() {
+            None
+        } else {
+            Some(which::which(path).context("mpv executable was not found at the specified path")?)
+        };
         let settings = Settings {
             ytdlp_path,
-            seek_seconds: self.fields[1]
+            mpv_path,
+            seek_seconds: self.fields[2]
                 .trim()
                 .parse()
                 .context("Seek interval must be a positive whole number of seconds")?,
-            volume_step: self.fields[2]
+            volume_step: self.fields[3]
                 .trim()
                 .parse()
                 .context("Volume step must be a whole number between 1 and 100")?,
         };
         settings.validate()?;
-        let directory = self.fields[3].trim();
+        let directory = self.fields[4].trim();
         if directory.is_empty() {
             anyhow::bail!("Enter a data folder");
         }
@@ -181,7 +191,7 @@ impl App {
         )?;
         let path = storage.library_path();
         let library = Library::load(&path)?;
-        let player = Player::start(settings.executable());
+        let player = Player::start(settings.executable(), settings.mpv_executable());
         Ok(Self {
             settings,
             storage,
@@ -363,9 +373,11 @@ impl App {
 
     fn open_settings(&mut self) {
         let executable = self.settings.displayed_executable();
+        let mpv = self.settings.displayed_mpv_executable();
         self.settings_form = Some(SettingsForm {
             fields: [
                 executable.clone(),
+                mpv.clone(),
                 self.settings.seek_seconds.to_string(),
                 self.settings.volume_step.to_string(),
                 self.storage.directory.to_string_lossy().into_owned(),
@@ -373,6 +385,7 @@ impl App {
             focus: 0,
             error: None,
             original_ytdlp: executable,
+            original_mpv: mpv,
         });
     }
 
@@ -389,8 +402,10 @@ impl App {
             return;
         };
         match key.code {
-            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1) % 4,
-            KeyCode::BackTab | KeyCode::Up => form.focus = (form.focus + 3) % 4,
+            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1) % form.fields.len(),
+            KeyCode::BackTab | KeyCode::Up => {
+                form.focus = (form.focus + form.fields.len() - 1) % form.fields.len()
+            }
             KeyCode::Backspace => {
                 form.fields[form.focus].pop();
             }
@@ -420,7 +435,9 @@ impl App {
             });
         match result {
             Ok((settings, storage)) => {
-                let restart = settings.ytdlp_path != self.settings.ytdlp_path || !self.ready;
+                let restart = settings.ytdlp_path != self.settings.ytdlp_path
+                    || settings.mpv_path != self.settings.mpv_path
+                    || !self.ready;
                 self.settings = settings;
                 self.path = storage.library_path();
                 self.storage = storage;
@@ -434,7 +451,8 @@ impl App {
                     self.error = None;
                     self.missing_ytdlp = None;
                     self.playback = Playback::default();
-                    self.player = Player::start(self.settings.executable());
+                    self.player =
+                        Player::start(self.settings.executable(), self.settings.mpv_executable());
                     self.status = "Restarting playback engine with saved settings...".into();
                 }
             }
@@ -1282,7 +1300,7 @@ pub(crate) mod tests {
     fn real_track_switch_keeps_playback_error_free() -> Result<()> {
         let url = std::env::var("YTUNE_SMOKE_URL").context("Set YTUNE_SMOKE_URL")?;
         let (mut app, _directory, _commands, _events) = fixture();
-        app.player = Player::start(crate::metadata::executable());
+        app.player = Player::start(crate::metadata::executable(), app.settings.mpv_executable());
         app.ready = false;
         app.library.add("First", "First selection", &url)?;
         app.library.add("Second", "Final selection", &url)?;
@@ -1942,6 +1960,7 @@ pub(crate) mod tests {
         key(&mut app, KeyCode::Char('t'));
         assert!(app.settings_form.is_some());
         key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Tab);
         app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         app.handle_paste("25");
         key(&mut app, KeyCode::Tab);
@@ -1971,6 +1990,63 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn mpv_settings_preserve_discovery_resolve_paths_and_clear_overrides() -> Result<()> {
+        let (mut app, _directory, _commands, _events) = fixture();
+        key(&mut app, KeyCode::Char('t'));
+        let form = app.settings_form.as_mut().unwrap();
+        assert_eq!(
+            form.fields,
+            [
+                app.settings.displayed_executable(),
+                app.settings.displayed_mpv_executable(),
+                app.settings.seek_seconds.to_string(),
+                app.settings.volume_step.to_string(),
+                app.storage.directory.to_string_lossy().into_owned(),
+            ]
+        );
+        assert_eq!(form.values(&app.settings)?.0.mpv_path, None);
+        let executable = std::env::current_exe()?;
+        form.fields[1] = executable.to_string_lossy().into_owned();
+        assert_eq!(
+            form.values(&app.settings)?.0.mpv_path,
+            Some(which::which(&executable)?)
+        );
+        app.settings.mpv_path = Some(executable.clone());
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::Char('t'));
+        let form = app.settings_form.as_mut().unwrap();
+        assert_eq!(form.values(&app.settings)?.0.mpv_path, Some(executable));
+        form.fields[1].clear();
+        assert_eq!(form.values(&app.settings)?.0.mpv_path, None);
+        key(&mut app, KeyCode::Up);
+        assert_eq!(app.settings_form.as_ref().unwrap().focus, 4);
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.settings_form.as_ref().unwrap().focus, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn changing_mpv_settings_persists_path_and_restarts_playback() -> Result<()> {
+        let (mut app, directory, commands, _events) = fixture();
+        app.settings.ytdlp_path = Some(directory.path().join("missing-yt-dlp.exe"));
+        app.playback.active = true;
+        app.muted = true;
+        let executable = std::env::current_exe()?;
+        key(&mut app, KeyCode::Char('t'));
+        app.settings_form.as_mut().unwrap().fields[1] = executable.to_string_lossy().into_owned();
+        key(&mut app, KeyCode::Enter);
+        assert!(app.settings_form.is_none());
+        assert_eq!(commands.recv()?, json!(["quit"]));
+        assert!(!app.ready);
+        assert!(!app.playback.active);
+        assert!(!app.muted);
+        assert_eq!(app.settings.mpv_path, Some(which::which(executable)?));
+        assert_eq!(Storage::load(directory.path())?.1, app.settings);
+        app.player.shutdown();
+        Ok(())
+    }
+
+    #[test]
     fn settings_relocation_updates_library_and_default_export_paths() -> Result<()> {
         let (mut app, directory, _commands, _events) = fixture();
         app.library.add("Old", "One", "https://youtu.be/one")?;
@@ -1978,7 +2054,7 @@ pub(crate) mod tests {
         let original_path = app.path.clone();
         let target = directory.path().join("new folder");
         key(&mut app, KeyCode::Char('t'));
-        app.settings_form.as_mut().unwrap().fields[3] = target.to_string_lossy().into_owned();
+        app.settings_form.as_mut().unwrap().fields[4] = target.to_string_lossy().into_owned();
         key(&mut app, KeyCode::Enter);
         assert!(app.settings_form.is_none());
         assert_eq!(app.path, target.join("library.json"));
@@ -2003,11 +2079,12 @@ pub(crate) mod tests {
             .save(directory.path(), &app.settings, &app.library)?;
         let before = std::fs::read(app.storage.settings_path())?;
         for (field, value) in [
-            (1, "0"),
-            (1, "abc"),
-            (2, "101"),
-            (3, ""),
+            (2, "0"),
+            (2, "abc"),
+            (3, "101"),
+            (4, ""),
             (0, "missing-yt-dlp-executable.exe"),
+            (1, "missing-mpv-executable.exe"),
         ] {
             key(&mut app, KeyCode::Char('t'));
             app.settings_form.as_mut().unwrap().fields[field] = value.to_string();
@@ -2049,9 +2126,9 @@ pub(crate) mod tests {
         let data_dir = directory.path().join("configured data");
         let form = app.settings_form.as_mut().unwrap();
         form.fields[0] = executable;
-        form.fields[1] = "15".into();
-        form.fields[2] = "8".into();
-        form.fields[3] = data_dir.to_string_lossy().into_owned();
+        form.fields[2] = "15".into();
+        form.fields[3] = "8".into();
+        form.fields[4] = data_dir.to_string_lossy().into_owned();
         key(&mut app, KeyCode::Enter);
         assert!(
             app.settings_form.is_none(),

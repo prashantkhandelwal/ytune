@@ -57,7 +57,7 @@ impl Player {
         )
     }
 
-    pub fn start(executable: OsString) -> Self {
+    pub fn start(executable: OsString, mpv: OsString) -> Self {
         let (commands, incoming) = mpsc::channel();
         let (outgoing, events) = mpsc::channel();
         let worker = thread::spawn(move || {
@@ -65,7 +65,7 @@ impl Player {
                 .enable_all()
                 .build()
                 .context("Cannot start playback runtime")
-                .and_then(|runtime| runtime.block_on(run(incoming, &outgoing, executable)));
+                .and_then(|runtime| runtime.block_on(run(incoming, &outgoing, executable, mpv)));
             if let Err(error) = result {
                 let event = if error.downcast_ref::<MissingYtdlp>().is_some() {
                     PlayerEvent::YtdlpMissing(format!("{error:#}"))
@@ -141,6 +141,7 @@ async fn run(
     commands: Receiver<Value>,
     events: &Sender<PlayerEvent>,
     ytdlp: OsString,
+    mpv: OsString,
 ) -> Result<()> {
     check_ytdlp(&ytdlp)?;
     #[cfg(windows)]
@@ -150,7 +151,6 @@ async fn run(
         .join(format!("ytune-{}.sock", std::process::id()))
         .to_string_lossy()
         .into_owned();
-    let mpv = std::env::var_os("YTUNE_MPV").unwrap_or_else(|| "mpv".into());
     let child = Command::new(mpv)
         .args([
             "--no-config",
@@ -171,7 +171,9 @@ async fn run(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("mpv not found. Install mpv, or set YTUNE_MPV to its executable path")?;
+        .context(
+            "Cannot start mpv. Set its executable path in Settings, install mpv, or set YTUNE_MPV",
+        )?;
     let mut engine = Engine { child, endpoint };
     let connection = connect(&mut engine).await?;
     let (reader, mut writer) = tokio::io::split(connection);
@@ -309,7 +311,10 @@ mod tests {
     #[test]
     #[ignore = "Requires mpv, yt-dlp and an audio device; optionally set YTUNE_SMOKE_URL"]
     fn real_mpv_playback_smoke_test() -> Result<()> {
-        let player = Player::start(crate::metadata::executable());
+        let player = Player::start(
+            crate::metadata::executable(),
+            crate::config::Settings::default().mpv_executable(),
+        );
         loop {
             match player.events.recv_timeout(Duration::from_secs(15))? {
                 PlayerEvent::Ready => break,

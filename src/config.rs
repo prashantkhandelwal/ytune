@@ -14,6 +14,7 @@ use crate::library::Library;
 #[serde(default)]
 pub struct Settings {
     pub ytdlp_path: Option<PathBuf>,
+    pub mpv_path: Option<PathBuf>,
     pub seek_seconds: u32,
     pub volume_step: u8,
 }
@@ -22,6 +23,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             ytdlp_path: None,
+            mpv_path: None,
             seek_seconds: 10,
             volume_step: 5,
         }
@@ -30,6 +32,13 @@ impl Default for Settings {
 
 impl Settings {
     pub fn validate(&self) -> Result<()> {
+        if self
+            .mpv_path
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            bail!("The mpv path cannot be empty; use null for automatic discovery");
+        }
         if self
             .ytdlp_path
             .as_ref()
@@ -54,7 +63,21 @@ impl Settings {
     }
 
     pub fn displayed_executable(&self) -> String {
-        let executable = self.executable();
+        Self::display_path(self.executable())
+    }
+
+    pub fn mpv_executable(&self) -> OsString {
+        self.mpv_path
+            .as_ref()
+            .map(|path| path.as_os_str().to_owned())
+            .unwrap_or_else(|| std::env::var_os("YTUNE_MPV").unwrap_or_else(|| "mpv".into()))
+    }
+
+    pub fn displayed_mpv_executable(&self) -> String {
+        Self::display_path(self.mpv_executable())
+    }
+
+    fn display_path(executable: OsString) -> String {
         match which::which(&executable) {
             Ok(path) => path.to_string_lossy().into_owned(),
             Err(_) => executable.to_string_lossy().into_owned(),
@@ -210,6 +233,7 @@ mod tests {
         let (storage, settings) = Storage::load(directory.path())?;
         assert_eq!(settings, Settings::default());
         let settings = Settings {
+            mpv_path: Some(directory.path().join("mpv folder").join("mpv.exe")),
             seek_seconds: 25,
             volume_step: 7,
             ..settings
@@ -329,10 +353,34 @@ mod tests {
         let executable = std::env::current_exe()?;
         let settings = Settings {
             ytdlp_path: Some(executable.clone()),
+            mpv_path: Some(executable.clone()),
             ..Settings::default()
         };
         assert_eq!(settings.executable(), executable.as_os_str());
         assert!(Path::new(&settings.displayed_executable()).is_absolute());
+        assert_eq!(settings.mpv_executable(), executable.as_os_str());
+        assert!(Path::new(&settings.displayed_mpv_executable()).is_absolute());
+        Ok(())
+    }
+
+    #[test]
+    fn older_settings_keep_automatic_mpv_discovery_and_empty_mpv_paths_are_invalid() -> Result<()> {
+        let settings: Settings =
+            serde_json::from_str(r#"{"ytdlp_path":null,"seek_seconds":25,"volume_step":7}"#)?;
+        assert_eq!(settings.mpv_path, None);
+        assert_eq!(settings.seek_seconds, 25);
+        assert_eq!(
+            settings.mpv_executable(),
+            std::env::var_os("YTUNE_MPV").unwrap_or_else(|| "mpv".into())
+        );
+        assert!(
+            Settings {
+                mpv_path: Some(PathBuf::new()),
+                ..settings
+            }
+            .validate()
+            .is_err()
+        );
         Ok(())
     }
 }

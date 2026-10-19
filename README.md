@@ -18,6 +18,10 @@ Playback progress uses a thin seek track with a rectangular playhead. Elapsed an
 total time are displayed below the track, so the playhead never covers them.
 Use Left/Right to seek by the configured interval.
 
+## Screenshot
+
+![ytune app showing the playlist and playback interface](screenshots/ytunes.png)
+
 ## Requirements
 
 - Current stable Rust (edition 2024; tested with Rust 1.93)
@@ -180,6 +184,12 @@ Text is appended at the end of the active field.
   restarts the playback engine and stops current playback. Saving while the
   engine is Not Ready also retries startup. The same executable is used for
   metadata lookup and streaming.
+- **mpv executable:** shows the resolved executable path when available.
+  Enter the path to mpv itself (for example, `C:\tools\mpv\mpv.exe`), not a GUI
+  launcher. Paths containing spaces are supported. A saved path takes precedence
+  over `YTUNE_MPV` and PATH. Clear the field to return to automatic discovery
+  (`YTUNE_MPV`, then PATH). Saving a changed path stops current playback and
+  restarts the playback engine. Saving while the engine is Not Ready retries startup.
 - **Seek interval:** a positive whole number of seconds; default **10**.
 - **Volume step:** a whole-number percentage from **1** to **100**; default **5**.
   Seek and volume changes take effect immediately without restarting playback.
@@ -205,6 +215,7 @@ Example `settings.json`:
 ```json
 {
   "ytdlp_path": "C:\\tools\\yt-dlp.exe",
+  "mpv_path": "C:\\tools\\mpv\\mpv.exe",
   "seek_seconds": 10,
   "volume_step": 5
 }
