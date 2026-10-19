@@ -706,7 +706,7 @@ fn details(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Line::raw(format!("Repeat:   {}", app.repeat.label())),
         Line::raw(""),
-        Line::styled("Source", Style::default().fg(Color::DarkGray)),
+        Line::styled("Source", Style::default().fg(Color::Gray)),
         Line::raw(
             track
                 .map(|t| t.url.as_str())
@@ -785,6 +785,29 @@ fn time(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_label_is_gray_without_changing_url_color() -> anyhow::Result<()> {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        let url = "https://youtu.be/one";
+        app.library.add("Focus", "Test track", url)?;
+        let mut terminal = Terminal::new(TestBackend::new(80, 20))?;
+        terminal.draw(|frame| details(frame, &app, frame.area()))?;
+        let buffer = terminal.backend().buffer();
+        for (index, character) in "Source".chars().enumerate() {
+            let cell = &buffer[(1 + index as u16, 10)];
+            assert_eq!(cell.symbol(), character.to_string());
+            assert_eq!(cell.fg, Color::Gray);
+        }
+        for (index, character) in url.chars().enumerate() {
+            let cell = &buffer[(1 + index as u16, 11)];
+            assert_eq!(cell.symbol(), character.to_string());
+            assert_eq!(cell.fg, Color::Reset);
+        }
+        Ok(())
+    }
 
     #[test]
     fn renders_library_details_shortcuts_and_add_dialog() -> anyhow::Result<()> {
