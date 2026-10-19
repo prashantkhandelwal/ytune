@@ -101,6 +101,8 @@ entire library. Collapse state lasts for the current session.
 | e | Export the entire library as JSON |
 | i | Import and merge a saved JSON playlist/library |
 | t | Open Settings |
+| d | Browse related MusicBrainz recordings in Audio Details |
+| f | Refresh related songs; retry the lookup in a discovery view |
 | s | Stop audio and reset playback position |
 | Delete | Ask to remove the selected track; y confirms, n / Esc cancels |
 | q | Quit (main view) |
@@ -111,6 +113,50 @@ and saves, and **Esc** cancels. Text is appended at the end of the active field.
 Fields are locked while metadata is resolving. Failed lookups or saves leave
 the dialog open with an error and do not add a partial track. Lookup times out
 after 60 seconds; fix the problem and press Enter to retry.
+
+### Related songs
+
+Audio Details looks up other recordings by the displayed artist using
+[MusicBrainz](https://musicbrainz.org/). It shows up to **five** distinct song
+titles, excluding the current title when it matches. These are recordings by
+the same artist, not personalized recommendations or a popularity ranking.
+Artist names are taken from playback or saved metadata (with the uploader as
+the existing fallback); missing artist metadata is shown explicitly. Artist
+names are resolved to MusicBrainz IDs before fetching recordings. When several
+artists have the same name, **d**, **Up / Down**, and **Enter** let you choose
+the intended artist using MusicBrainz's disambiguation labels, rather than
+guessing. That artist's results are reused for the current session; **f**
+refreshes the lookup and lets you choose again.
+
+Press **d** to focus the related-song list, **Up / Down** to select a song, and
+**Enter** to search YouTube inside the app. **Esc** returns to the library.
+On smaller terminals, focusing this list temporarily replaces the metadata
+view so all five songs remain accessible. Playback continues in the background.
+
+The YouTube search uses the configured yt-dlp executable and returns up to
+five videos. Select a result with **Up / Down**, then:
+
+- Press **a** to open the existing Add dialog, choose a category, and press
+  **Enter** to resolve metadata and save.
+- Press **Enter** to resolve metadata, save to the source track's category,
+  and play. A video already saved in that category is played without adding
+  a duplicate. The playback engine must be ready.
+- Press **f** to retry a failed or empty search, or **Esc** to cancel and
+  return to related songs.
+
+Lookups do not block navigation or playback. Artist changes cancel stale
+MusicBrainz lookups; results are cached per artist for the current session.
+MusicBrainz requests are spaced at least one second apart and include an
+identifying application User-Agent. The displayed artist name is sent to
+MusicBrainz; selecting a related title sends the artist and title to YouTube
+through yt-dlp. Errors and empty results are shown in the corresponding view.
+Temporary MusicBrainz failures (HTTP 429, 502, 503, or 504) are retried
+automatically up to twice, with increasing delays and respect for the server's
+`Retry-After` header. These waits remain cancellable and do not block playback.
+If the service stays unavailable, a concise error is shown instead of the full
+request URL. Press **f** from the main view or related songs to refresh
+MusicBrainz results, or **f** in YouTube search to retry that search.
+**r** remains the repeat control in all three views.
 
 Escape only dismisses dialogs; it does nothing in the main view. Ctrl+C does
 not quit. In text-entry dialogs, `q` is ordinary text; close the dialog with

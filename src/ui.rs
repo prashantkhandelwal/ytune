@@ -24,6 +24,8 @@ enum ShortcutMode {
     Settings,
     MissingDependency,
     Delete,
+    Related,
+    YoutubeSearch,
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -50,6 +52,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ShortcutMode::Export
     } else if app.import_form.is_some() {
         ShortcutMode::Import
+    } else if app.youtube_search.is_some() {
+        ShortcutMode::YoutubeSearch
+    } else if app.related_focus {
+        ShortcutMode::Related
     } else {
         ShortcutMode::Playback
     };
@@ -226,6 +232,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if app.settings_form.is_some() {
         settings_dialog(frame, app, rows[1]);
+    }
+    if app.youtube_search.is_some() {
+        youtube_dialog(frame, app, rows[1]);
     }
     if app.player_shortcuts_open {
         let width = area.width.saturating_sub(6).min(70);
@@ -488,6 +497,76 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn youtube_dialog(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(search) = &app.youtube_search else {
+        return;
+    };
+    let width = area.width.saturating_sub(6).min(88);
+    let height = area.height.min(18);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(" YouTube search | Esc: back ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(2),
+        Constraint::Length(3),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(search.query.as_str())
+            .style(Style::default().fg(ACCENT))
+            .wrap(Wrap { trim: true }),
+        rows[0],
+    );
+    let items: Vec<_> = search
+        .results
+        .iter()
+        .map(|result| {
+            ListItem::new(vec![
+                Line::raw(result.title.as_str()),
+                Line::styled(result.uploader.as_str(), Style::default().fg(Color::Gray)),
+            ])
+        })
+        .collect();
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("> ")
+            .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        rows[1],
+        &mut ListState::default()
+            .with_selected((!search.results.is_empty()).then_some(search.selected)),
+    );
+    let message = if let Some(error) = &search.error {
+        error.as_str()
+    } else if search.loading() {
+        "Searching YouTube with yt-dlp... Esc cancels."
+    } else if search.results.is_empty() {
+        "No YouTube results found. Press f to retry."
+    } else {
+        "a: choose category and add | Enter: resolve, save and play"
+    };
+    frame.render_widget(
+        Paragraph::new(message)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(if search.error.is_some() {
+                Color::LightRed
+            } else {
+                Color::Gray
+            })),
+        rows[2],
+    );
+}
+
 fn shortcut_lines(mode: ShortcutMode, width: u16) -> Vec<Line<'static>> {
     let shortcuts: &[(&str, &str)] = match mode {
         ShortcutMode::Add => &[
@@ -507,6 +586,23 @@ fn shortcut_lines(mode: ShortcutMode, width: u16) -> Vec<Line<'static>> {
         ],
         ShortcutMode::MissingDependency => &[("t", "Settings"), ("Esc", "Dismiss"), ("q", "Quit")],
         ShortcutMode::Delete => &[("y", "Delete"), ("n/Esc", "Cancel"), ("q", "Quit")],
+        ShortcutMode::Related => &[
+            ("Up/Down", "Select"),
+            ("Enter", "Open"),
+            ("f", "Retry"),
+            ("r", "Repeat"),
+            ("Esc", "Library"),
+            ("q", "Quit"),
+        ],
+        ShortcutMode::YoutubeSearch => &[
+            ("Up/Down", "Select"),
+            ("a", "Add"),
+            ("Enter", "Add/Play"),
+            ("f", "Retry"),
+            ("r", "Repeat"),
+            ("Esc", "Back"),
+            ("q", "Quit"),
+        ],
         ShortcutMode::PlayerControls => &[
             ("Up/Down", "Select"),
             ("Space", "Play/Pause"),
@@ -523,6 +619,8 @@ fn shortcut_lines(mode: ShortcutMode, width: u16) -> Vec<Line<'static>> {
             ("e", "Export"),
             ("i", "Import"),
             ("t", "Settings"),
+            ("d", "Related songs"),
+            ("f", "Refresh related"),
             ("Tab", "Expand/Collapse"),
             ("Del", "Remove"),
             ("q", "Quit"),
@@ -645,21 +743,30 @@ fn library(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn details(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .title(" Audio details ");
+    if !app.details_artist().trim().is_empty() && !app.related_focus {
+        block = block.title_bottom(" d: related songs ");
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let sections = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).split(inner);
+    if app.related_focus {
+        related_songs(frame, app, sections[0]);
+        seek_bar(
+            frame,
+            sections[1],
+            app.playback.position,
+            app.playback.duration,
+        );
+        return;
+    }
     let playing = &app.playback;
     let selected = app.library.get(app.selected);
-    let track = playing.track.as_ref().or_else(|| selected.map(|(_, t)| t));
+    let track = app.details_track();
     let stored = track.and_then(|track| track.metadata.as_ref());
-    let artist = if playing.artist.is_empty() {
-        stored.map(|m| m.artist_label()).unwrap_or("")
-    } else {
-        &playing.artist
-    };
+    let artist = app.details_artist();
     let album = if playing.album.is_empty() {
         stored.and_then(|m| m.album.as_deref()).unwrap_or("")
     } else {
@@ -689,7 +796,7 @@ fn details(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "Playing"
     };
-    let lines = vec![
+    let mut lines = vec![
         Line::styled(
             title,
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -713,8 +820,80 @@ fn details(frame: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or("Add a video with a"),
         ),
     ];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), sections[0]);
+    if !artist.trim().is_empty() && sections[0].height >= 15 {
+        lines.retain(|line| !line.spans.is_empty() && line.width() > 0);
+        let content =
+            Layout::vertical([Constraint::Min(8), Constraint::Length(7)]).split(sections[0]);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), content[0]);
+        related_songs(frame, app, content[1]);
+    } else {
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), sections[0]);
+    }
     seek_bar(frame, sections[1], playing.position, duration);
+}
+
+fn related_songs(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .title(if !app.related.artist_matches.is_empty() {
+            " Choose artist - MusicBrainz | d: browse "
+        } else if app.related_focus {
+            " Related - MusicBrainz | Enter: search "
+        } else {
+            " Related - MusicBrainz | d: browse "
+        })
+        .border_style(Style::default().fg(if app.related_focus {
+            ACCENT
+        } else {
+            Color::Gray
+        }));
+    let message = if app.details_artist().trim().is_empty() {
+        Some("No artist metadata. Select or play a track with an artist.")
+    } else if let Some(error) = &app.related.error {
+        Some(error.as_str())
+    } else if app.related.loading {
+        Some("Looking up other recordings by this artist...")
+    } else if app.related.songs.is_empty() && app.related.artist_matches.is_empty() {
+        Some("No other recordings found for this artist. Press f to retry.")
+    } else {
+        None
+    };
+    if let Some(message) = message {
+        frame.render_widget(
+            Paragraph::new(message)
+                .block(block)
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(if app.related.error.is_some() {
+                    Color::LightRed
+                } else {
+                    Color::Gray
+                })),
+            area,
+        );
+    } else {
+        let items: Vec<_> = if app.related.artist_matches.is_empty() {
+            app.related
+                .songs
+                .iter()
+                .map(|song| ListItem::new(song.as_str()))
+                .collect()
+        } else {
+            app.related
+                .artist_matches
+                .iter()
+                .map(|artist| ListItem::new(artist.label()))
+                .collect()
+        };
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(block)
+                .highlight_symbol("> ")
+                .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            area,
+            &mut ListState::default()
+                .with_selected(app.related_focus.then_some(app.related_selected)),
+        );
+    }
 }
 
 fn seek_bar(frame: &mut Frame, area: Rect, position: f64, duration: f64) {
@@ -785,6 +964,118 @@ fn time(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_shortcuts_use_f_for_retry_and_preserve_r_for_repeat() {
+        for mode in [ShortcutMode::Related, ShortcutMode::YoutubeSearch] {
+            let lines = shortcut_lines(mode, 62);
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.to_string().contains("f  Retry"))
+            );
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.to_string().contains("r  Repeat"))
+            );
+            assert!(
+                !lines
+                    .iter()
+                    .any(|line| line.to_string().contains("r  Retry"))
+            );
+        }
+    }
+
+    #[test]
+    fn related_songs_are_visible_in_audio_details_and_focus_fits_small_terminals()
+    -> anyhow::Result<()> {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        app.library.add_resolved(
+            "Music",
+            "",
+            "https://youtu.be/current",
+            crate::metadata::tests::sample(),
+        )?;
+        app.related.artist = "Artist".into();
+        app.related.songs = (1..=5)
+            .map(|index| format!("Related song {index}"))
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(110, 30))?;
+        terminal.draw(|frame| draw(frame, &app))?;
+        let content = format!("{}", terminal.backend());
+        assert!(content.contains("MusicBrainz"));
+        for song in &app.related.songs {
+            assert!(content.contains(song), "Missing related recording: {song}");
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        for (width, height) in [(110, 30), (64, 20)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+            terminal.draw(|frame| draw(frame, &app))?;
+            let content = format!("{}", terminal.backend());
+            assert!(content.contains("Audio details"));
+            assert!(content.contains("MusicBrainz"));
+            for song in &app.related.songs {
+                assert!(content.contains(song));
+            }
+            app.related.error = Some("MusicBrainz is offline".into());
+            terminal.draw(|frame| draw(frame, &app))?;
+            assert!(format!("{}", terminal.backend()).contains("MusicBrainz is offline"));
+            app.related.error = None;
+            app.related.artist_matches = vec![
+                crate::discovery::tests::sample_artist("one", "First band"),
+                crate::discovery::tests::sample_artist("two", "Second band"),
+            ];
+            terminal.draw(|frame| draw(frame, &app))?;
+            let content = format!("{}", terminal.backend());
+            assert!(content.contains("Choose artist"));
+            assert!(content.contains("Artist - First band"));
+            assert!(content.contains("Artist - Second band"));
+            app.related.artist_matches.clear();
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn youtube_search_results_scroll_and_show_actions_and_errors() -> anyhow::Result<()> {
+        use crate::discovery::{SearchResult, YoutubeSearch};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        for (width, height) in [(110, 30), (64, 20)] {
+            app.youtube_search = Some(YoutubeSearch::completed(
+                "Music".into(),
+                Ok((1..=5)
+                    .map(|index| SearchResult {
+                        title: format!("Video result {index}"),
+                        ..crate::discovery::tests::sample_result()
+                    })
+                    .collect()),
+            ));
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+            terminal.draw(|frame| draw(frame, &app))?;
+            let content = format!("{}", terminal.backend());
+            assert!(content.contains("YouTube search"));
+            assert!(content.contains("Video result 1"));
+            assert!(content.contains("Enter  Add/Play"));
+            for _ in 0..4 {
+                app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            }
+            terminal.draw(|frame| draw(frame, &app))?;
+            assert!(format!("{}", terminal.backend()).contains("Video result 5"));
+            app.youtube_search.as_mut().unwrap().error = Some("YouTube search failed".into());
+            terminal.draw(|frame| draw(frame, &app))?;
+            assert!(format!("{}", terminal.backend()).contains("YouTube search failed"));
+            app.youtube_search = Some(YoutubeSearch::completed("Music".into(), Ok(Vec::new())));
+            terminal.draw(|frame| draw(frame, &app))?;
+            assert!(format!("{}", terminal.backend()).contains("No YouTube results found"));
+        }
+        Ok(())
+    }
 
     #[test]
     fn source_label_is_gray_without_changing_url_color() -> anyhow::Result<()> {
@@ -1015,6 +1306,8 @@ mod tests {
             ShortcutMode::Settings,
             ShortcutMode::MissingDependency,
             ShortcutMode::Delete,
+            ShortcutMode::Related,
+            ShortcutMode::YoutubeSearch,
         ] {
             for width in [56, 62, 78, 108, 158] {
                 let lines = shortcut_lines(mode, width);
@@ -1049,8 +1342,10 @@ mod tests {
                             | ShortcutMode::Export
                             | ShortcutMode::Import
                             | ShortcutMode::Settings
+                            | ShortcutMode::Related
+                            | ShortcutMode::YoutubeSearch
                     ),
-                    "Enter should only be shown for saving, exporting, importing, or settings"
+                    "Enter should only be shown when the mode has an Enter action"
                 );
                 assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
                 for line in lines {

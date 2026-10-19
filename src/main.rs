@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod discovery;
 mod library;
 mod metadata;
 mod player;

@@ -1,5 +1,6 @@
 use std::{
     ffi::OsString,
+    future::Future,
     process::Stdio,
     sync::mpsc::{self, Receiver},
     thread::{self, JoinHandle},
@@ -48,15 +49,17 @@ pub fn executable() -> OsString {
     std::env::var_os("YTUNE_YTDLP").unwrap_or_else(|| "yt-dlp".into())
 }
 
-pub struct Resolver {
-    pub results: Receiver<Result<TrackMetadata, String>>,
+pub type Resolver = Lookup<TrackMetadata>;
+
+pub struct Lookup<T> {
+    pub results: Receiver<Result<T, String>>,
     cancel: Option<oneshot::Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
 
-impl Resolver {
+impl<T: Send + 'static> Lookup<T> {
     #[cfg(test)]
-    pub fn completed(result: Result<TrackMetadata, String>) -> Self {
+    pub fn completed(result: Result<T, String>) -> Self {
         let (sender, results) = mpsc::channel();
         sender.send(result).unwrap();
         Self {
@@ -66,23 +69,30 @@ impl Resolver {
         }
     }
 
-    pub fn start(url: String, executable: OsString) -> Self {
+    pub fn spawn<F, Fut>(name: &'static str, lookup: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T>>,
+    {
         let (sender, results) = mpsc::channel();
         let (cancel, cancelled) = oneshot::channel();
         let worker = thread::spawn(move || {
             let result = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .context("Cannot start metadata resolver")
+                .with_context(|| format!("Cannot start {name} lookup"))
                 .map(|runtime| {
-                    runtime.block_on(async {
+                    let result = runtime.block_on(async {
                         tokio::select! {
                             _ = cancelled => None,
-                            result = tokio::time::timeout(Duration::from_secs(60), resolve(&url, executable)) => {
-                                Some(result.context("Metadata lookup timed out after 60 seconds").and_then(|r| r))
+                            result = tokio::time::timeout(Duration::from_secs(60), lookup()) => {
+                                Some(result.with_context(|| format!("{name} lookup timed out after 60 seconds")).and_then(|r| r))
                             }
                         }
-                    })
+                    });
+                    // A cancelled HTTP lookup must not wait for blocking system DNS work.
+                    runtime.shutdown_background();
+                    result
                 });
             let result = match result {
                 Ok(None) => return,
@@ -99,7 +109,15 @@ impl Resolver {
     }
 }
 
-impl Drop for Resolver {
+impl Lookup<TrackMetadata> {
+    pub fn start(url: String, executable: OsString) -> Self {
+        Self::spawn("Metadata", move || async move {
+            resolve(&url, executable).await
+        })
+    }
+}
+
+impl<T> Drop for Lookup<T> {
     fn drop(&mut self) {
         if let Some(cancel) = self.cancel.take() {
             let _ = cancel.send(());
@@ -155,6 +173,21 @@ pub(crate) mod tests {
 
     pub fn sample() -> TrackMetadata {
         parse(br#"{"title":"Resolved title","artist":"Artist","album":"Album","uploader":"Channel","duration":120,"thumbnail":"https://example.test/thumb.jpg","upload_date":"20261018"}"#).unwrap()
+    }
+
+    #[test]
+    fn cancelling_a_lookup_does_not_wait_for_its_timeout() -> Result<()> {
+        let (started, ready) = mpsc::channel();
+        let lookup = Lookup::spawn("Cancellation test", move || async move {
+            started.send(())?;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        });
+        ready.recv_timeout(Duration::from_secs(5))?;
+        let start = std::time::Instant::now();
+        drop(lookup);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        Ok(())
     }
 
     #[test]

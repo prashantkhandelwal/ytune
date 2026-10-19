@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::{
     config::{Settings, Storage},
+    discovery::{RelatedSongs, YoutubeSearch},
     library::{Library, Track},
     metadata::{Resolver, TrackMetadata},
     player::{Player, PlayerEvent},
@@ -175,10 +176,15 @@ pub struct App {
     pub missing_ytdlp: Option<String>,
     pub export_form: Option<PathForm>,
     pub import_form: Option<PathForm>,
+    pub related: RelatedSongs,
+    pub related_focus: bool,
+    pub related_selected: usize,
+    pub youtube_search: Option<YoutubeSearch>,
     pub quit: bool,
     player: Player,
     resolver: Option<Resolver>,
     pending_playback: Option<Instant>,
+    play_after_add: bool,
 }
 
 impl App {
@@ -214,10 +220,15 @@ impl App {
             missing_ytdlp: None,
             export_form: None,
             import_form: None,
+            related: RelatedSongs::default(),
+            related_focus: false,
+            related_selected: 0,
+            youtube_search: None,
             quit: false,
             player,
             resolver: None,
             pending_playback: None,
+            play_after_add: false,
         })
     }
 
@@ -259,6 +270,30 @@ impl App {
         }
         if self.import_form.is_some() {
             self.handle_import(key);
+            return;
+        }
+        if self.youtube_search.is_some() {
+            self.handle_youtube_search(key);
+            return;
+        }
+        if self.related_focus {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('d') => self.related_focus = false,
+                KeyCode::Char('q') if key.modifiers.is_empty() => self.quit = true,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.related_selected = (self.related_selected + 1)
+                        .min(self.related.item_count().saturating_sub(1));
+                }
+                KeyCode::Up => self.related_selected = self.related_selected.saturating_sub(1),
+                KeyCode::Char('f') => self.related.retry(),
+                KeyCode::Char('r') => self.repeat = self.repeat.cycle(),
+                KeyCode::Enter if !self.related.artist_matches.is_empty() => {
+                    self.related.choose_artist(self.related_selected);
+                    self.related_selected = 0;
+                }
+                KeyCode::Enter => self.search_related_song(),
+                _ => {}
+            }
             return;
         }
         if self.player_shortcuts_open {
@@ -336,6 +371,8 @@ impl App {
                 self.send(json!(["cycle", "mute"]));
             }
             KeyCode::Char('t') => self.open_settings(),
+            KeyCode::Char('d') => self.related_focus = true,
+            KeyCode::Char('f') => self.related.retry(),
             KeyCode::Char('s') => self.stop(),
             KeyCode::Char('a') => {
                 let category = self
@@ -368,6 +405,106 @@ impl App {
             }
             KeyCode::Delete => self.request_remove(),
             _ => {}
+        }
+    }
+
+    pub fn details_track(&self) -> Option<&Track> {
+        self.playback
+            .track
+            .as_ref()
+            .or_else(|| self.library.get(self.selected).map(|(_, track)| track))
+    }
+
+    pub fn details_artist(&self) -> &str {
+        if !self.playback.artist.trim().is_empty() {
+            &self.playback.artist
+        } else {
+            self.details_track()
+                .and_then(|track| track.metadata.as_ref())
+                .map(|metadata| metadata.artist_label())
+                .unwrap_or("")
+        }
+    }
+
+    fn search_related_song(&mut self) {
+        let Some(title) = self.related.songs.get(self.related_selected) else {
+            return;
+        };
+        let category = if self.playback.track.is_some() {
+            self.playback.category.clone()
+        } else {
+            self.library
+                .get(self.selected)
+                .map(|(category, _)| category.to_owned())
+                .unwrap_or_else(|| "Favorites".into())
+        };
+        self.youtube_search = Some(YoutubeSearch::start(
+            format!("{} {title}", self.related.artist),
+            category,
+            self.settings.executable(),
+        ));
+    }
+
+    fn handle_youtube_search(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.youtube_search = None,
+            KeyCode::Char('q') if key.modifiers.is_empty() => self.quit = true,
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(search) = &mut self.youtube_search {
+                    search.selected =
+                        (search.selected + 1).min(search.results.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Up => {
+                if let Some(search) = &mut self.youtube_search {
+                    search.selected = search.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Char('r') => self.repeat = self.repeat.cycle(),
+            KeyCode::Char('f') => {
+                if let Some(search) = &self.youtube_search {
+                    self.youtube_search = Some(YoutubeSearch::start(
+                        search.query.clone(),
+                        search.category.clone(),
+                        self.settings.executable(),
+                    ));
+                }
+            }
+            KeyCode::Char('a') => self.choose_search_result(false),
+            KeyCode::Enter => self.choose_search_result(true),
+            _ => {}
+        }
+    }
+
+    fn choose_search_result(&mut self, play: bool) {
+        let Some(search) = &mut self.youtube_search else {
+            return;
+        };
+        let Some(result) = search.results.get(search.selected) else {
+            return;
+        };
+        if play && !self.ready {
+            search.error = Some(
+                "Playback engine is not ready. Use a to add, or Esc then t to fix Settings.".into(),
+            );
+            return;
+        }
+        let category = search.category.clone();
+        let result = result.clone();
+        self.youtube_search = None;
+        self.related_focus = false;
+        if play && let Some(index) = self.library.index_of(&category, &result.url) {
+            self.play(index, false);
+            return;
+        }
+        self.form = Some(AddForm {
+            fields: [category, String::new(), result.url],
+            focus: 0,
+            error: None,
+        });
+        self.play_after_add = play;
+        if play {
+            self.save_form();
         }
     }
 
@@ -468,6 +605,7 @@ impl App {
         if key.code == KeyCode::Esc {
             self.resolver = None;
             self.form = None;
+            self.play_after_add = false;
             return;
         }
         if self.resolving() {
@@ -565,6 +703,10 @@ impl App {
                 }
                 self.form = None;
                 self.status = "Track saved to library".into();
+                if self.play_after_add {
+                    self.play_after_add = false;
+                    self.play(index, false);
+                }
             }
             Err(error) => {
                 if let Some(form) = &mut self.form {
@@ -949,6 +1091,30 @@ impl App {
                 PlayerEvent::Message(message) => self.handle_message(&message),
             }
         }
+        if let Some(search) = &mut self.youtube_search {
+            search.poll();
+        }
+        if !self.quit {
+            let artist = self.details_artist().to_owned();
+            let title = self
+                .details_track()
+                .map(|track| {
+                    track
+                        .metadata
+                        .as_ref()
+                        .map(|metadata| metadata.title.as_str())
+                        .unwrap_or(&track.title)
+                })
+                .unwrap_or("")
+                .to_owned();
+            if !self.related.artist.eq_ignore_ascii_case(artist.trim()) {
+                self.related_selected = 0;
+            }
+            self.related.update(&artist, &title, Instant::now());
+            self.related_selected = self
+                .related_selected
+                .min(self.related.item_count().saturating_sub(1));
+        }
         self.start_pending_playback(Instant::now());
     }
 
@@ -1147,10 +1313,15 @@ pub(crate) mod tests {
             missing_ytdlp: None,
             export_form: None,
             import_form: None,
+            related: RelatedSongs::default(),
+            related_focus: false,
+            related_selected: 0,
+            youtube_search: None,
             quit: false,
             player,
             resolver: None,
             pending_playback: None,
+            play_after_add: false,
         };
         (app, directory, commands, events)
     }
@@ -1159,6 +1330,193 @@ pub(crate) mod tests {
         app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
         // Control tests use settled playback; debounce tests send keys directly.
         app.start_pending_playback(Instant::now() + TRACK_SETTLE_DELAY);
+    }
+
+    #[test]
+    fn discovery_refresh_uses_f_and_r_always_cycles_repeat() -> Result<()> {
+        let (mut app, directory, _commands, _events) = fixture();
+        app.related.artist = "Artist".into();
+        app.related.error = Some("MusicBrainz unavailable".into());
+        key(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.repeat, Repeat::Track);
+        assert!(app.related.error.is_some());
+        key(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.repeat, Repeat::Track);
+        assert!(app.related.error.is_none());
+        assert!(app.related.loading);
+        key(&mut app, KeyCode::Char('d'));
+        app.related.error = Some("MusicBrainz unavailable".into());
+        key(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.repeat, Repeat::All);
+        assert!(app.related.error.is_some());
+        key(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.repeat, Repeat::All);
+        assert!(app.related.error.is_none());
+        app.settings.ytdlp_path = Some(directory.path().join("missing-yt-dlp.exe"));
+        app.youtube_search = Some(YoutubeSearch::completed(
+            "Music".into(),
+            Err("Search failed".into()),
+        ));
+        key(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.repeat, Repeat::Off);
+        assert!(app.youtube_search.as_ref().unwrap().error.is_some());
+        key(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.repeat, Repeat::Off);
+        assert!(app.youtube_search.as_ref().unwrap().loading());
+        assert!(app.youtube_search.as_ref().unwrap().error.is_none());
+        key(&mut app, KeyCode::Esc);
+        Ok(())
+    }
+
+    #[test]
+    fn related_artist_choices_are_selected_before_searching_for_songs() {
+        let (mut app, _directory, _commands, _events) = fixture();
+        app.related.artist = "Artist".into();
+        app.related.artist_matches = vec![
+            crate::discovery::tests::sample_artist("first", "First band"),
+            crate::discovery::tests::sample_artist("second", "Second band"),
+        ];
+        key(&mut app, KeyCode::Char('d'));
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.related_selected, 1);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.related_selected, 0);
+        assert!(app.related.loading);
+        assert!(app.related.artist_matches.is_empty());
+        assert!(app.youtube_search.is_none());
+    }
+
+    #[test]
+    fn related_songs_focus_searches_the_selected_recording_and_cancels_without_saving() -> Result<()>
+    {
+        let (mut app, directory, _commands, _events) = fixture();
+        app.settings.ytdlp_path = Some(directory.path().join("missing-yt-dlp.exe"));
+        app.library
+            .add("My playlist", "Current", "https://youtu.be/current")?;
+        app.related.artist = "Artist".into();
+        app.related.songs = vec!["First".into(), "Second".into()];
+        key(&mut app, KeyCode::Char('d'));
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.related_selected, 1);
+        assert_eq!(app.selected, 0);
+        key(&mut app, KeyCode::Enter);
+        let search = app.youtube_search.as_ref().unwrap();
+        assert_eq!(search.query, "Artist Second");
+        assert_eq!(search.category, "My playlist");
+        key(&mut app, KeyCode::Esc);
+        assert!(app.youtube_search.is_none());
+        assert!(app.related_focus);
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.related_focus);
+        assert_eq!(app.library.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn related_search_add_uses_existing_metadata_flow_without_interrupting_playback() -> Result<()>
+    {
+        let (mut app, _directory, commands, _events) = fixture();
+        app.library
+            .add("Old", "Current", "https://youtu.be/current")?;
+        key(&mut app, KeyCode::Char(' '));
+        commands.recv()?;
+        commands.recv()?;
+        let result = crate::discovery::tests::sample_result();
+        app.youtube_search = Some(YoutubeSearch::completed(
+            "Related".into(),
+            Ok(vec![result.clone()]),
+        ));
+        app.related_focus = true;
+        key(&mut app, KeyCode::Char('a'));
+        let form = app.form.as_ref().unwrap();
+        assert_eq!(form.fields[0], "Related");
+        assert_eq!(form.fields[2], result.url);
+        assert!(app.youtube_search.is_none());
+        assert!(!app.related_focus);
+        assert!(!app.play_after_add);
+        app.form.as_mut().unwrap().fields[0] = "Chosen category".into();
+        app.resolver = Some(Resolver::completed(Ok(crate::metadata::tests::sample())));
+        app.poll_player();
+        assert!(app.form.is_none());
+        assert_eq!(app.library.len(), 2);
+        assert_eq!(app.library.get(1).unwrap().0, "Chosen category");
+        assert!(
+            Library::load(&app.path)?
+                .get(1)
+                .unwrap()
+                .1
+                .metadata
+                .is_some()
+        );
+        assert_eq!(
+            app.playback.track.as_ref().unwrap().url,
+            "https://youtu.be/current"
+        );
+        assert!(commands.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn related_search_play_resolves_saves_and_plays_and_reuses_saved_duplicates() -> Result<()> {
+        let (mut app, directory, commands, _events) = fixture();
+        app.settings.ytdlp_path = Some(directory.path().join("missing-yt-dlp.exe"));
+        let result = crate::discovery::tests::sample_result();
+        app.youtube_search = Some(YoutubeSearch::completed(
+            "Related".into(),
+            Ok(vec![result.clone()]),
+        ));
+        key(&mut app, KeyCode::Enter);
+        assert!(app.resolving());
+        assert!(app.play_after_add);
+        app.resolver = Some(Resolver::completed(Ok(crate::metadata::tests::sample())));
+        app.poll_player();
+        app.start_pending_playback(Instant::now() + TRACK_SETTLE_DELAY);
+        assert!(app.form.is_none());
+        assert!(!app.play_after_add);
+        assert_eq!(Library::load(&app.path)?.len(), 1);
+        assert_eq!(commands.recv()?, json!(["loadfile", result.url, "replace"]));
+        assert_eq!(commands.recv()?, json!(["set_property", "pause", false]));
+        app.youtube_search = Some(YoutubeSearch::completed(
+            "Related".into(),
+            Ok(vec![result.clone()]),
+        ));
+        key(&mut app, KeyCode::Enter);
+        assert!(!app.resolving());
+        assert_eq!(app.library.len(), 1);
+        assert_eq!(commands.recv()?, json!(["loadfile", result.url, "replace"]));
+        assert_eq!(commands.recv()?, json!(["set_property", "pause", false]));
+        Ok(())
+    }
+
+    #[test]
+    fn related_search_reports_unavailable_playback_and_failed_resolution_and_can_cancel()
+    -> Result<()> {
+        let (mut app, directory, commands, _events) = fixture();
+        app.settings.ytdlp_path = Some(directory.path().join("missing-yt-dlp.exe"));
+        app.ready = false;
+        app.youtube_search = Some(YoutubeSearch::completed(
+            "Related".into(),
+            Ok(vec![crate::discovery::tests::sample_result()]),
+        ));
+        key(&mut app, KeyCode::Enter);
+        assert!(app.youtube_search.as_ref().unwrap().error.is_some());
+        assert!(app.form.is_none());
+        app.ready = true;
+        key(&mut app, KeyCode::Enter);
+        app.resolver = Some(Resolver::completed(Err("Video unavailable".into())));
+        app.poll_player();
+        assert_eq!(
+            app.form.as_ref().unwrap().error.as_deref(),
+            Some("Video unavailable")
+        );
+        assert!(app.play_after_add);
+        assert_eq!(app.library.len(), 0);
+        assert!(commands.try_recv().is_err());
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.play_after_add);
+        assert!(!app.resolving());
+        assert!(app.form.is_none());
+        Ok(())
     }
 
     #[test]
