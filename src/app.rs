@@ -291,6 +291,10 @@ impl App {
                 KeyCode::Up => self.related_selected = self.related_selected.saturating_sub(1),
                 KeyCode::Char('f') => self.related.retry(),
                 KeyCode::Char('r') => self.repeat = self.repeat.cycle(),
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    self.change_volume(f64::from(self.settings.volume_step))
+                }
+                KeyCode::Char('-') => self.change_volume(-f64::from(self.settings.volume_step)),
                 KeyCode::Enter if !self.related.artist_matches.is_empty() => {
                     self.related.choose_artist(self.related_selected);
                     self.related_selected = 0;
@@ -1394,6 +1398,45 @@ pub(crate) mod tests {
         assert!(app.related.loading);
         assert!(app.related.artist_matches.is_empty());
         assert!(app.youtube_search.is_none());
+    }
+
+    #[test]
+    fn related_browsing_volume_uses_configured_step_and_preserves_selection() -> Result<()> {
+        let (mut app, _directory, commands, _events) = fixture();
+        app.settings.volume_step = 7;
+        app.related.songs = vec!["First".into(), "Second".into()];
+        key(&mut app, KeyCode::Char('d'));
+        key(&mut app, KeyCode::Down);
+        for artist_choices in [false, true] {
+            if artist_choices {
+                app.related.artist_matches = vec![
+                    crate::discovery::tests::sample_artist("first", "First band"),
+                    crate::discovery::tests::sample_artist("second", "Second band"),
+                ];
+            }
+            app.volume = 70.0;
+            for (shortcut, expected) in [('+', 77.0), ('=', 84.0), ('-', 77.0)] {
+                key(&mut app, KeyCode::Char(shortcut));
+                assert_eq!(
+                    commands.recv()?,
+                    json!(["set_property", "volume", expected])
+                );
+                assert_eq!(app.volume, expected);
+                assert!(app.related_focus);
+                assert_eq!(app.related_selected, 1);
+                assert_eq!(app.selected, 0);
+            }
+            for (volume, shortcut, expected) in [(98.0, '+', 100.0), (2.0, '-', 0.0)] {
+                app.volume = volume;
+                key(&mut app, KeyCode::Char(shortcut));
+                assert_eq!(
+                    commands.recv()?,
+                    json!(["set_property", "volume", expected])
+                );
+                assert_eq!(app.volume, expected);
+            }
+        }
+        Ok(())
     }
 
     #[test]

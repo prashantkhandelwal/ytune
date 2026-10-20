@@ -129,6 +129,8 @@ Press **d** to focus the related-song list, **Up / Down** to select a song, and
 **Enter** to search YouTube inside the app. **Esc** returns to the library.
 On smaller terminals, focusing this list temporarily replaces the metadata
 view so the songs remain accessible by scrolling. Playback continues in the background.
+Use **+ / -** (or **=** to increase) to adjust volume by the configured step
+without leaving the related-song list or artist choices.
 
 The YouTube search uses the configured yt-dlp executable and returns up to
 five videos. Select a result with **Up / Down**, then:

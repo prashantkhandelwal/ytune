@@ -596,6 +596,7 @@ fn shortcut_lines(mode: ShortcutMode, width: u16) -> Vec<Line<'static>> {
         ShortcutMode::Related => &[
             ("Up/Down", "Select"),
             ("Enter", "Open"),
+            ("+/-", "Volume"),
             ("f", "Retry"),
             ("r", "Repeat"),
             ("Esc", "Library"),
@@ -990,6 +991,17 @@ mod tests {
                 !lines
                     .iter()
                     .any(|line| line.to_string().contains("r  Retry"))
+            );
+        }
+    }
+
+    #[test]
+    fn related_shortcuts_show_volume_controls() {
+        for width in [56, 62, 108] {
+            assert!(
+                shortcut_lines(ShortcutMode::Related, width)
+                    .iter()
+                    .any(|line| line.to_string().contains("+/-  Volume"))
             );
         }
     }
