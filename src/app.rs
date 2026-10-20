@@ -78,7 +78,7 @@ pub struct DeleteConfirmation {
 }
 
 pub struct SettingsForm {
-    pub fields: [String; 5],
+    pub fields: [String; 6],
     pub focus: usize,
     pub error: Option<String>,
     original_ytdlp: String,
@@ -109,17 +109,21 @@ impl SettingsForm {
         let settings = Settings {
             ytdlp_path,
             mpv_path,
-            seek_seconds: self.fields[2]
+            seek_seconds: self.fields[3]
                 .trim()
                 .parse()
                 .context("Seek interval must be a positive whole number of seconds")?,
-            volume_step: self.fields[3]
+            volume_step: self.fields[4]
                 .trim()
                 .parse()
                 .context("Volume step must be a whole number between 1 and 100")?,
+            related_song_limit: self.fields[5]
+                .trim()
+                .parse()
+                .context("Related song limit must be a whole number between 1 and 100")?,
         };
         settings.validate()?;
-        let directory = self.fields[4].trim();
+        let directory = self.fields[2].trim();
         if directory.is_empty() {
             anyhow::bail!("Enter a data folder");
         }
@@ -515,9 +519,10 @@ impl App {
             fields: [
                 executable.clone(),
                 mpv.clone(),
+                self.storage.directory.to_string_lossy().into_owned(),
                 self.settings.seek_seconds.to_string(),
                 self.settings.volume_step.to_string(),
-                self.storage.directory.to_string_lossy().into_owned(),
+                self.settings.related_song_limit.to_string(),
             ],
             focus: 0,
             error: None,
@@ -1110,7 +1115,12 @@ impl App {
             if !self.related.artist.eq_ignore_ascii_case(artist.trim()) {
                 self.related_selected = 0;
             }
-            self.related.update(&artist, &title, Instant::now());
+            self.related.update(
+                &artist,
+                &title,
+                Instant::now(),
+                self.settings.related_song_limit,
+            );
             self.related_selected = self
                 .related_selected
                 .min(self.related.item_count().saturating_sub(1));
@@ -2319,15 +2329,20 @@ pub(crate) mod tests {
         assert!(app.settings_form.is_some());
         key(&mut app, KeyCode::Tab);
         key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Tab);
         app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         app.handle_paste("25");
         key(&mut app, KeyCode::Tab);
         app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         app.handle_paste("7");
+        key(&mut app, KeyCode::Tab);
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.handle_paste("20");
         key(&mut app, KeyCode::Enter);
         assert!(app.settings_form.is_none());
         assert_eq!(app.settings.seek_seconds, 25);
         assert_eq!(app.settings.volume_step, 7);
+        assert_eq!(app.settings.related_song_limit, 20);
         assert_eq!(Storage::load(directory.path())?.1, app.settings);
         app.library.add("Test", "One", "https://youtu.be/one")?;
         key(&mut app, KeyCode::Char(' '));
@@ -2357,9 +2372,10 @@ pub(crate) mod tests {
             [
                 app.settings.displayed_executable(),
                 app.settings.displayed_mpv_executable(),
+                app.storage.directory.to_string_lossy().into_owned(),
                 app.settings.seek_seconds.to_string(),
                 app.settings.volume_step.to_string(),
-                app.storage.directory.to_string_lossy().into_owned(),
+                app.settings.related_song_limit.to_string(),
             ]
         );
         assert_eq!(form.values(&app.settings)?.0.mpv_path, None);
@@ -2377,9 +2393,35 @@ pub(crate) mod tests {
         form.fields[1].clear();
         assert_eq!(form.values(&app.settings)?.0.mpv_path, None);
         key(&mut app, KeyCode::Up);
-        assert_eq!(app.settings_form.as_ref().unwrap().focus, 4);
+        assert_eq!(app.settings_form.as_ref().unwrap().focus, 5);
         key(&mut app, KeyCode::Tab);
         assert_eq!(app.settings_form.as_ref().unwrap().focus, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_related_song_limits_preserve_active_and_saved_settings() -> Result<()> {
+        let (mut app, directory, _commands, _events) = fixture();
+        app.storage
+            .save(directory.path(), &app.settings, &app.library)?;
+        let original = app.settings.clone();
+        for value in ["0", "101", "-1", "abc", ""] {
+            key(&mut app, KeyCode::Char('t'));
+            app.settings_form.as_mut().unwrap().fields[5] = value.into();
+            key(&mut app, KeyCode::Enter);
+            assert!(
+                app.settings_form
+                    .as_ref()
+                    .unwrap()
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("Related song limit")
+            );
+            assert_eq!(app.settings, original);
+            assert_eq!(Storage::load(directory.path())?.1, original);
+            key(&mut app, KeyCode::Esc);
+        }
         Ok(())
     }
 
@@ -2412,7 +2454,7 @@ pub(crate) mod tests {
         let original_path = app.path.clone();
         let target = directory.path().join("new folder");
         key(&mut app, KeyCode::Char('t'));
-        app.settings_form.as_mut().unwrap().fields[4] = target.to_string_lossy().into_owned();
+        app.settings_form.as_mut().unwrap().fields[2] = target.to_string_lossy().into_owned();
         key(&mut app, KeyCode::Enter);
         assert!(app.settings_form.is_none());
         assert_eq!(app.path, target.join("library.json"));
@@ -2437,10 +2479,10 @@ pub(crate) mod tests {
             .save(directory.path(), &app.settings, &app.library)?;
         let before = std::fs::read(app.storage.settings_path())?;
         for (field, value) in [
-            (2, "0"),
-            (2, "abc"),
-            (3, "101"),
-            (4, ""),
+            (3, "0"),
+            (3, "abc"),
+            (4, "101"),
+            (2, ""),
             (0, "missing-yt-dlp-executable.exe"),
             (1, "missing-mpv-executable.exe"),
         ] {
@@ -2484,9 +2526,9 @@ pub(crate) mod tests {
         let data_dir = directory.path().join("configured data");
         let form = app.settings_form.as_mut().unwrap();
         form.fields[0] = executable;
-        form.fields[2] = "15".into();
-        form.fields[3] = "8".into();
-        form.fields[4] = data_dir.to_string_lossy().into_owned();
+        form.fields[2] = data_dir.to_string_lossy().into_owned();
+        form.fields[3] = "15".into();
+        form.fields[4] = "8".into();
         key(&mut app, KeyCode::Enter);
         assert!(
             app.settings_form.is_none(),

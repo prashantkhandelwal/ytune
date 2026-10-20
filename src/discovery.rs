@@ -12,7 +12,7 @@ use tokio::process::Command;
 
 use crate::metadata::Lookup;
 
-pub const SONG_LIMIT: usize = 5;
+const YOUTUBE_RESULT_LIMIT: usize = 5;
 const SETTLE_DELAY: Duration = Duration::from_millis(400);
 const REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_RETRIES: u32 = 2;
@@ -68,7 +68,7 @@ impl RelatedSongs {
         self.deadline = Some(Instant::now() + SETTLE_DELAY);
     }
 
-    pub fn update(&mut self, artist: &str, title: &str, now: Instant) {
+    pub fn update(&mut self, artist: &str, title: &str, now: Instant, limit: usize) {
         let artist = artist.trim();
         let changed = normalize(artist) != normalize(&self.artist);
         if changed {
@@ -87,7 +87,7 @@ impl RelatedSongs {
         }
         let key = normalize(artist);
         if let Some(titles) = self.cache.get(&key) {
-            self.songs = other_songs(titles, title);
+            self.songs = other_songs(titles, title, limit);
             self.loading = false;
             self.deadline = None;
             return;
@@ -113,7 +113,7 @@ impl RelatedSongs {
                 self.loading = false;
                 match result {
                     Ok(MusicBrainzResult::Recordings(titles)) => {
-                        self.songs = other_songs(&titles, &self.title);
+                        self.songs = other_songs(&titles, &self.title, limit);
                         self.cache.insert(key, titles);
                     }
                     Ok(MusicBrainzResult::Artists(artists)) => self.artist_matches = artists,
@@ -138,12 +138,12 @@ fn normalize(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
-fn other_songs(titles: &[String], current: &str) -> Vec<String> {
+fn other_songs(titles: &[String], current: &str, limit: usize) -> Vec<String> {
     let current = normalize(current);
     titles
         .iter()
         .filter(|title| normalize(title) != current)
-        .take(SONG_LIMIT)
+        .take(limit)
         .cloned()
         .collect()
 }
@@ -247,7 +247,7 @@ async fn recordings(artist: String, artist_id: Option<String>) -> Result<MusicBr
         .user_agent(concat!(
             "ytune/",
             env!("CARGO_PKG_VERSION"),
-            " (https://github.com/prashantkhandelwal/ytunes)"
+            " (https://github.com/prashantkhandelwal/ytune)"
         ))
         .timeout(Duration::from_secs(20))
         .build()
@@ -442,7 +442,7 @@ async fn search_youtube(query: String, executable: OsString) -> Result<Vec<Searc
             "--extractor-retries",
             "1",
             "--",
-            &format!("ytsearch{SONG_LIMIT}:{query}"),
+            &format!("ytsearch{YOUTUBE_RESULT_LIMIT}:{query}"),
         ])
         .stdin(Stdio::null())
         .kill_on_drop(true)
@@ -484,7 +484,7 @@ fn parse_search(json: &[u8]) -> Result<Vec<SearchResult>> {
         {
             bail!("YouTube search returned an invalid video ID or title");
         }
-        if seen.insert(entry.id.clone()) && results.len() < SONG_LIMIT {
+        if seen.insert(entry.id.clone()) && results.len() < YOUTUBE_RESULT_LIMIT {
             results.push(SearchResult {
                 title: entry.title,
                 url: format!("https://www.youtube.com/watch?v={}", entry.id),
@@ -626,12 +626,12 @@ pub(crate) mod tests {
     fn ambiguous_artist_choices_fetch_the_selected_id_and_cache_its_songs() {
         let now = Instant::now();
         let mut related = RelatedSongs::default();
-        related.update("Artist", "Current", now);
+        related.update("Artist", "Current", now, 5);
         related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Artists(vec![
             sample_artist("first", "First band"),
             sample_artist("second", "Second band"),
         ]))));
-        related.update("Artist", "Current", now);
+        related.update("Artist", "Current", now, 5);
         assert!(!related.loading);
         assert_eq!(related.item_count(), 2);
         related.choose_artist(1);
@@ -642,12 +642,12 @@ pub(crate) mod tests {
             "Current".into(),
             "Other".into(),
         ]))));
-        related.update("Artist", "Current", now);
+        related.update("Artist", "Current", now, 5);
         assert_eq!(related.songs, ["Other"]);
         assert!(!related.loading);
-        related.update("Another artist", "", now);
+        related.update("Another artist", "", now, 5);
         assert!(related.selected_artist_id.is_none());
-        related.update("Artist", "Current", now);
+        related.update("Artist", "Current", now, 5);
         assert_eq!(related.songs, ["Other"]);
         assert!(!related.loading);
     }
@@ -700,9 +700,10 @@ pub(crate) mod tests {
                 }
             }
         };
-        let songs = other_songs(&titles, "Bohemian Rhapsody");
+        let limit = crate::config::Settings::default().related_song_limit;
+        let songs = other_songs(&titles, "Bohemian Rhapsody", limit);
         assert!(!songs.is_empty());
-        assert!(songs.len() <= SONG_LIMIT);
+        assert!(songs.len() <= limit);
         println!("MusicBrainz related recordings: {songs:?}");
         Ok(())
     }
@@ -724,7 +725,7 @@ pub(crate) mod tests {
             .recv_timeout(Duration::from_secs(65))?
             .map_err(anyhow::Error::msg)?;
         assert!(!results.is_empty());
-        assert!(results.len() <= SONG_LIMIT);
+        assert!(results.len() <= YOUTUBE_RESULT_LIMIT);
         let mut library = crate::library::Library::default();
         for result in results {
             library.add("Search", &result.title, &result.url)?;
@@ -751,7 +752,7 @@ pub(crate) mod tests {
         let response = serde_json::from_value(json!({"recordings": rows}))?;
         let titles = recording_titles(response, "artist-id")?;
         assert_eq!(
-            other_songs(&titles, "current"),
+            other_songs(&titles, "current", 5),
             ["Song", "Two", "Three", "Four", "Five"]
         );
         assert_eq!(
@@ -779,33 +780,53 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn configured_limit_applies_to_fresh_and_cached_recordings() {
+        let now = Instant::now();
+        let mut related = RelatedSongs::default();
+        related.update("Artist", "Current", now, 10);
+        let mut titles = vec!["Current".into()];
+        titles.extend((1..=100).map(|index| format!("Song {index}")));
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(titles))));
+        related.update("Artist", "Current", now, 10);
+        assert_eq!(related.songs.len(), 10);
+        assert_eq!(related.songs[0], "Song 1");
+        assert_eq!(related.songs[9], "Song 10");
+        for limit in [1, 100, 5] {
+            related.update("Artist", "Current", now, limit);
+            assert_eq!(related.songs.len(), limit);
+            assert!(!related.loading);
+            assert!(related.lookup.is_none());
+        }
+    }
+
+    #[test]
     fn related_lookup_caches_by_artist_ignores_stale_results_and_supports_retry() {
         let now = Instant::now();
         let mut related = RelatedSongs::default();
-        related.update("Artist", "Current", now);
+        related.update("Artist", "Current", now, 5);
         assert!(related.loading);
         related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(vec![
             "Current".into(),
             "Other".into(),
         ]))));
-        related.update("Artist", "Current", now);
+        related.update("Artist", "Current", now, 5);
         assert_eq!(related.songs, ["Other"]);
-        related.update("ARTIST", "Other", now);
+        related.update("ARTIST", "Other", now, 5);
         assert_eq!(related.songs, ["Current"]);
         assert!(!related.loading);
         related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(vec![
             "Stale".into(),
         ]))));
-        related.update("New artist", "", now);
+        related.update("New artist", "", now, 5);
         assert!(related.songs.is_empty());
         assert!(related.lookup.is_none());
         related.lookup = Some(Lookup::completed(Err("Offline".into())));
-        related.update("New artist", "", now);
+        related.update("New artist", "", now, 5);
         assert_eq!(related.error.as_deref(), Some("Offline"));
         related.retry();
         assert!(related.loading);
         assert!(related.error.is_none());
-        related.update("", "", now);
+        related.update("", "", now, 5);
         assert!(!related.loading);
         assert!(related.deadline.is_none());
     }
@@ -825,7 +846,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             parse_search(&serde_json::to_vec(&json!({"entries": entries}))?)?.len(),
-            SONG_LIMIT
+            YOUTUBE_RESULT_LIMIT
         );
         let mut search = YoutubeSearch {
             query: "Artist Song".into(),

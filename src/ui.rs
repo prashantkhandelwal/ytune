@@ -406,45 +406,52 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
     }
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let sections = Layout::vertical([Constraint::Length(11), Constraint::Min(0)]).split(inner);
+    let visible_fields = usize::from(inner.height.saturating_sub(1) / 2).min(form.fields.len());
+    let first_field = (form.focus + 1).saturating_sub(visible_fields);
+    let last_field = (first_field + visible_fields).min(form.fields.len());
+    let sections = Layout::vertical([
+        Constraint::Length(visible_fields as u16 * 2 + 1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
     let columns =
         Layout::horizontal([Constraint::Length(20), Constraint::Min(1)]).split(sections[0]);
     let labels = [
         "yt-dlp executable",
         "mpv executable",
+        "Data folder",
         "Seek interval (s)",
         "Volume step (%)",
-        "Data folder",
+        "Related song limit",
     ];
-    // Shared edges keep five bordered inputs visible in a 64 x 20 terminal.
-    for index in (0..labels.len())
+    for index in (first_field..last_field)
         .filter(|&index| index != form.focus)
-        .chain(std::iter::once(form.focus))
+        .chain((visible_fields > 0).then_some(form.focus))
     {
         let focused = index == form.focus;
         let input = Rect::new(
             columns[1].x,
-            columns[1].y + index as u16 * 2,
+            columns[1].y + (index - first_field) as u16 * 2,
             columns[1].width,
             3,
         );
         let input_border = border::Set {
-            top_left: if index == 0 {
+            top_left: if index == first_field {
                 border::PLAIN.top_left
             } else {
                 "\u{251c}"
             },
-            top_right: if index == 0 {
+            top_right: if index == first_field {
                 border::PLAIN.top_right
             } else {
                 "\u{2524}"
             },
-            bottom_left: if index == labels.len() - 1 {
+            bottom_left: if index == last_field - 1 {
                 border::PLAIN.bottom_left
             } else {
                 "\u{251c}"
             },
-            bottom_right: if index == labels.len() - 1 {
+            bottom_right: if index == last_field - 1 {
                 border::PLAIN.bottom_right
             } else {
                 "\u{2524}"
@@ -489,7 +496,7 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(
         Paragraph::new(form.error.as_deref().unwrap_or(
-            "Blank executable: auto. Seek > 0; volume 1-100. Folder changes copy data; executable changes stop playback.",
+            "Blank executable: auto. Seek > 0; volume and song limit 1-100. Folder changes copy data; executable changes stop playback.",
         )).wrap(Wrap { trim: true }).style(Style::default().fg(
             if form.error.is_some() { Color::LightRed } else { Color::Gray },
         )),
@@ -1594,9 +1601,10 @@ mod tests {
         app.settings_form.as_mut().unwrap().fields = [
             "C:\\yt-dlp.exe".into(),
             "C:\\mpv.exe".into(),
+            "C:\\Music".into(),
             "25".into(),
             "7".into(),
-            "C:\\Music".into(),
+            "20".into(),
         ];
         for (width, height) in [(110, 30), (64, 20)] {
             app.settings_form.as_mut().unwrap().focus = 0;
@@ -1612,7 +1620,7 @@ mod tests {
             let first_row = popup_y + 2;
             let buffer = terminal.backend().buffer();
             for (index, (label, value)) in
-                [("y", "C"), ("m", "C"), ("S", "2"), ("V", "7"), ("D", "C")]
+                [("y", "C"), ("m", "C"), ("D", "C"), ("S", "2"), ("V", "7")]
                     .iter()
                     .enumerate()
             {
@@ -1634,11 +1642,14 @@ mod tests {
             assert_eq!(buffer[(value_x, first_row)].bg, Color::Black);
             assert_eq!(buffer[(value_x, first_row + 2)].bg, Color::DarkGray);
             assert_eq!(buffer[(border_x, first_row + 1)].fg, ACCENT);
-            app.settings_form.as_mut().unwrap().focus = 4;
+            app.settings_form.as_mut().unwrap().focus = 5;
             terminal.draw(|frame| draw(frame, &app))?;
             let buffer = terminal.backend().buffer();
-            let last_row = first_row + 8;
+            let visible_fields = usize::from(body_height.min(18).saturating_sub(3) / 2).min(6);
+            let last_row = first_row + (visible_fields as u16 - 1) * 2;
             assert_eq!(buffer[(value_x, last_row)].bg, Color::DarkGray);
+            assert_eq!(buffer[(value_x, last_row)].symbol(), "2");
+            assert!(format!("{}", terminal.backend()).contains("Related song limit"));
             assert_eq!(buffer[(border_x, last_row + 1)].symbol(), "\u{2514}");
             assert_eq!(buffer[(border_x, last_row + 1)].fg, ACCENT);
         }

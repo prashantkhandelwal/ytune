@@ -17,6 +17,7 @@ pub struct Settings {
     pub mpv_path: Option<PathBuf>,
     pub seek_seconds: u32,
     pub volume_step: u8,
+    pub related_song_limit: usize,
 }
 
 impl Default for Settings {
@@ -26,6 +27,7 @@ impl Default for Settings {
             mpv_path: None,
             seek_seconds: 10,
             volume_step: 5,
+            related_song_limit: 5,
         }
     }
 }
@@ -51,6 +53,9 @@ impl Settings {
         }
         if !(1..=100).contains(&self.volume_step) {
             bail!("Volume step must be a whole number between 1 and 100");
+        }
+        if !(1..=100).contains(&self.related_song_limit) {
+            bail!("Related song limit must be a whole number between 1 and 100");
         }
         Ok(())
     }
@@ -236,6 +241,7 @@ mod tests {
             mpv_path: Some(directory.path().join("mpv folder").join("mpv.exe")),
             seek_seconds: 25,
             volume_step: 7,
+            related_song_limit: 20,
             ..settings
         };
         storage.save(directory.path(), &settings, &Library::default())?;
@@ -368,6 +374,7 @@ mod tests {
         let settings: Settings =
             serde_json::from_str(r#"{"ytdlp_path":null,"seek_seconds":25,"volume_step":7}"#)?;
         assert_eq!(settings.mpv_path, None);
+        assert_eq!(settings.related_song_limit, 5);
         assert_eq!(settings.seek_seconds, 25);
         assert_eq!(
             settings.mpv_executable(),
@@ -382,5 +389,16 @@ mod tests {
             .is_err()
         );
         Ok(())
+    }
+
+    #[test]
+    fn related_song_limit_accepts_only_one_to_one_hundred() {
+        for limit in [0, 1, 5, 100, 101] {
+            let settings = Settings {
+                related_song_limit: limit,
+                ..Settings::default()
+            };
+            assert_eq!(settings.validate().is_ok(), (1..=100).contains(&limit));
+        }
     }
 }

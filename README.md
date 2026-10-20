@@ -18,10 +18,6 @@ Playback progress uses a thin seek track with a rectangular playhead. Elapsed an
 total time are displayed below the track, so the playhead never covers them.
 Use Left/Right to seek by the configured interval.
 
-## Screenshot
-
-![ytune app showing the playlist and playback interface](screenshots/ytunes.png)
-
 ## Requirements
 
 - Current stable Rust (edition 2024; tested with Rust 1.93)
@@ -118,7 +114,8 @@ after 60 seconds; fix the problem and press Enter to retry.
 
 Audio Details looks up other recordings by the displayed artist using
 [MusicBrainz](https://musicbrainz.org/). It shows up to **five** distinct song
-titles, excluding the current title when it matches. These are recordings by
+titles by default, configurable from **1** to **100** using **Related song limit**
+in Settings. The current title is excluded when it matches. These are recordings by
 the same artist, not personalized recommendations or a popularity ranking.
 Artist names are taken from playback or saved metadata (with the uploader as
 the existing fallback); missing artist metadata is shown explicitly. Artist
@@ -131,7 +128,7 @@ refreshes the lookup and lets you choose again.
 Press **d** to focus the related-song list, **Up / Down** to select a song, and
 **Enter** to search YouTube inside the app. **Esc** returns to the library.
 On smaller terminals, focusing this list temporarily replaces the metadata
-view so all five songs remain accessible. Playback continues in the background.
+view so the songs remain accessible by scrolling. Playback continues in the background.
 
 The YouTube search uses the configured yt-dlp executable and returns up to
 five videos. Select a result with **Up / Down**, then:
@@ -236,11 +233,19 @@ Text is appended at the end of the active field.
   over `YTUNE_MPV` and PATH. Clear the field to return to automatic discovery
   (`YTUNE_MPV`, then PATH). Saving a changed path stops current playback and
   restarts the playback engine. Saving while the engine is Not Ready retries startup.
+- **Data folder:** the folder used for `library.json`, `settings.json`, and the
+  default export destination. Relative paths become absolute when saved.
 - **Seek interval:** a positive whole number of seconds; default **10**.
 - **Volume step:** a whole-number percentage from **1** to **100**; default **5**.
   Seek and volume changes take effect immediately without restarting playback.
-- **Data folder:** the folder used for `library.json`, `settings.json`, and the
-  default export destination. Relative paths become absolute when saved.
+- **Related song limit:** a whole number from **1** to **100**; default **5**.
+  Changes take effect immediately, including cached MusicBrainz results, without
+  restarting playback. Fewer songs may be available after filtering the first
+  100 recordings for distinct titles and excluding the current song. YouTube
+  search still returns up to five videos.
+
+Use **Tab / Shift+Tab** or **Up / Down** to navigate fields; on small terminals,
+the Settings fields scroll to keep the focused field visible.
 
 Changing the data folder copies the current library and the new settings to
 the destination and switches future reads/writes there. Old files are kept.
@@ -263,7 +268,8 @@ Example `settings.json`:
   "ytdlp_path": "C:\\tools\\yt-dlp.exe",
   "mpv_path": "C:\\tools\\mpv\\mpv.exe",
   "seek_seconds": 10,
-  "volume_step": 5
+  "volume_step": 5,
+  "related_song_limit": 5
 }
 ```
 
