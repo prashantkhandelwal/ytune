@@ -197,6 +197,61 @@ impl Library {
         }
         self.playlists.retain(|p| !p.tracks.is_empty());
     }
+
+    pub fn edit(&mut self, index: usize, fields: &[String; 4]) -> Result<usize> {
+        let [title, category, artist, album] = fields.each_ref().map(|value| value.trim());
+        if title.is_empty() || category.is_empty() {
+            bail!("Song name and category must not be empty");
+        }
+        if fields
+            .iter()
+            .any(|value| value.chars().any(char::is_control))
+        {
+            bail!("Audio details must contain no control characters");
+        }
+        let (original_category, original) = self.get(index).context("Track no longer exists")?;
+        if self
+            .index_of(category, &original.url)
+            .is_some_and(|other| other != index)
+        {
+            bail!("That URL is already in this category");
+        }
+        let same_category = original_category == category;
+        let mut track = original.clone();
+        track.title = title.into();
+        let metadata = track.metadata.get_or_insert_with(|| TrackMetadata {
+            title: title.into(),
+            artist: None,
+            album: None,
+            uploader: None,
+            duration: None,
+            thumbnail: None,
+            upload_date: None,
+        });
+        metadata.artist = Some(artist.into());
+        metadata.album = Some(album.into());
+        if same_category {
+            *self
+                .playlists
+                .iter_mut()
+                .flat_map(|playlist| &mut playlist.tracks)
+                .nth(index)
+                .context("Track no longer exists")? = track;
+            return Ok(index);
+        }
+        let url = track.url.clone();
+        self.remove(index);
+        if let Some(playlist) = self.playlists.iter_mut().find(|p| p.name == category) {
+            playlist.tracks.push(track);
+        } else {
+            self.playlists.push(Playlist {
+                name: category.into(),
+                tracks: vec![track],
+            });
+        }
+        self.index_of(category, &url)
+            .context("Edited track could not be located")
+    }
 }
 
 fn validate_url(value: &str) -> Result<()> {

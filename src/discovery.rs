@@ -34,6 +34,7 @@ pub struct RelatedSongs {
     pub artist: String,
     pub songs: Vec<String>,
     pub artist_matches: Vec<ArtistMatch>,
+    pub artist_choices: Vec<String>,
     pub error: Option<String>,
     pub loading: bool,
     title: String,
@@ -41,16 +42,109 @@ pub struct RelatedSongs {
     lookup: Option<Lookup<MusicBrainzResult>>,
     deadline: Option<Instant>,
     selected_artist_id: Option<String>,
+    current_artist: String,
+    song_artists: Vec<String>,
+    failures: HashMap<String, String>,
+    sources: HashMap<String, RecordingSource>,
+    page: usize,
+    page_size: usize,
+    chosen_artist: Option<String>,
+}
+
+struct RecordingSource {
+    artist_id: String,
+    next_offset: Option<usize>,
 }
 
 enum MusicBrainzResult {
     Artists(Vec<ArtistMatch>),
     Recordings(Vec<String>),
+    Page {
+        titles: Vec<String>,
+        artist_id: String,
+        next_offset: Option<usize>,
+    },
 }
 
 impl RelatedSongs {
+    fn lookup_artists(&self) -> Vec<String> {
+        if let Some(artist) = &self.chosen_artist {
+            vec![artist.clone()]
+        } else if self.artist_choices.is_empty() {
+            artist_names(&self.artist)
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn open_artist_picker(&mut self) -> bool {
+        let artists = artist_names(&self.artist);
+        if artists.len() < 2 {
+            return false;
+        }
+        self.lookup = None;
+        self.chosen_artist = None;
+        self.artist_choices = artists;
+        self.artist_matches.clear();
+        self.songs.clear();
+        self.song_artists.clear();
+        self.selected_artist_id = None;
+        self.current_artist.clear();
+        self.failures.clear();
+        self.error = None;
+        self.loading = false;
+        self.deadline = None;
+        self.page = 0;
+        true
+    }
+
+    pub fn page_number(&self) -> usize {
+        self.page + 1
+    }
+
+    pub fn has_next_page(&self) -> bool {
+        self.lookup_artists().iter().any(|name| {
+            self.cache.get(&artist_key(name)).is_some_and(|titles| {
+                other_song_count(titles, &self.title) > (self.page + 1) * self.page_size
+            })
+        })
+    }
+
+    pub fn turn_page(&mut self, backwards: bool, now: Instant, limit: usize) -> bool {
+        if self.loading || !self.artist_matches.is_empty() || !self.artist_choices.is_empty() {
+            return false;
+        }
+        if backwards {
+            if self.page == 0 {
+                return false;
+            }
+            self.page -= 1;
+        } else if self.has_next_page() {
+            self.page += 1;
+        } else {
+            return false;
+        }
+        let artist = self.artist.clone();
+        let title = self.title.clone();
+        self.update(&artist, &title, now, limit);
+        true
+    }
+
+    pub fn song_artist(&self, index: usize) -> &str {
+        self.song_artists
+            .get(index)
+            .map(String::as_str)
+            .unwrap_or(&self.artist)
+    }
+
+    pub fn lookup_artist(&self) -> &str {
+        &self.current_artist
+    }
+
     pub fn item_count(&self) -> usize {
-        if self.artist_matches.is_empty() {
+        if !self.artist_choices.is_empty() {
+            self.artist_choices.len()
+        } else if self.artist_matches.is_empty() {
             self.songs.len()
         } else {
             self.artist_matches.len()
@@ -58,6 +152,19 @@ impl RelatedSongs {
     }
 
     pub fn choose_artist(&mut self, index: usize) {
+        if !self.artist_choices.is_empty() {
+            let Some(artist) = self.artist_choices.get(index).cloned() else {
+                return;
+            };
+            self.current_artist = artist.clone();
+            self.chosen_artist = Some(artist);
+            self.artist_choices.clear();
+            self.page = 0;
+            let artist = self.artist.clone();
+            let title = self.title.clone();
+            self.update(&artist, &title, Instant::now(), self.page_size);
+            return;
+        }
         let Some(artist) = self.artist_matches.get(index) else {
             return;
         };
@@ -70,35 +177,47 @@ impl RelatedSongs {
 
     pub fn update(&mut self, artist: &str, title: &str, now: Instant, limit: usize) {
         let artist = artist.trim();
-        let changed = normalize(artist) != normalize(&self.artist);
+        let artists = artist_names(artist);
+        let changed = artists
+            .iter()
+            .map(|name| artist_key(name))
+            .collect::<Vec<_>>()
+            != artist_names(&self.artist)
+                .iter()
+                .map(|name| artist_key(name))
+                .collect::<Vec<_>>();
         if changed {
             self.lookup = None;
-            self.artist = artist.to_owned();
             self.songs.clear();
+            self.song_artists.clear();
             self.artist_matches.clear();
+            self.artist_choices = if artists.len() > 1 {
+                artists.clone()
+            } else {
+                Vec::new()
+            };
+            self.chosen_artist = None;
             self.selected_artist_id = None;
+            self.current_artist.clear();
+            self.failures.clear();
             self.error = None;
-            self.loading = !artist.is_empty();
+            self.loading = !artists.is_empty();
             self.deadline = self.loading.then_some(now + SETTLE_DELAY);
         }
-        self.title = title.to_owned();
-        if artist.is_empty() {
-            return;
+        if changed || normalize(title) != normalize(&self.title) || limit != self.page_size {
+            self.page = 0;
         }
-        let key = normalize(artist);
-        if let Some(titles) = self.cache.get(&key) {
-            self.songs = other_songs(titles, title, limit);
+        self.page_size = limit;
+        self.artist = artist.to_owned();
+        self.title = title.to_owned();
+        if !self.artist_choices.is_empty() {
             self.loading = false;
             self.deadline = None;
             return;
         }
-        if self.lookup.is_none() && self.deadline.is_some_and(|deadline| now >= deadline) {
-            let artist = self.artist.clone();
-            let artist_id = self.selected_artist_id.take();
-            self.lookup = Some(Lookup::spawn("MusicBrainz", move || {
-                recordings(artist, artist_id)
-            }));
-            self.deadline = None;
+        let artists = self.lookup_artists();
+        if artists.is_empty() {
+            return;
         }
         if let Some(lookup) = &self.lookup {
             let result = match lookup.results.try_recv() {
@@ -110,42 +229,175 @@ impl RelatedSongs {
             };
             if let Some(result) = result {
                 self.lookup = None;
-                self.loading = false;
+                let key = artist_key(&self.current_artist);
                 match result {
                     Ok(MusicBrainzResult::Recordings(titles)) => {
-                        self.songs = other_songs(&titles, &self.title, limit);
                         self.cache.insert(key, titles);
                     }
+                    Ok(MusicBrainzResult::Page {
+                        titles,
+                        artist_id,
+                        next_offset,
+                    }) => {
+                        let cached = self.cache.entry(key.clone()).or_default();
+                        let mut seen: HashSet<_> =
+                            cached.iter().map(|title| normalize(title)).collect();
+                        cached.extend(
+                            titles
+                                .into_iter()
+                                .filter(|title| seen.insert(normalize(title))),
+                        );
+                        self.sources.insert(
+                            key,
+                            RecordingSource {
+                                artist_id,
+                                next_offset,
+                            },
+                        );
+                    }
                     Ok(MusicBrainzResult::Artists(artists)) => self.artist_matches = artists,
-                    Err(error) => self.error = Some(error),
+                    Err(error) => {
+                        self.failures.insert(key, error);
+                    }
                 }
+            }
+        }
+        self.songs.clear();
+        self.song_artists.clear();
+        for name in &artists {
+            if let Some(titles) = self.cache.get(&artist_key(name)) {
+                for song in song_page(titles, &self.title, self.page, limit) {
+                    self.songs.push(song);
+                    self.song_artists.push(name.clone());
+                }
+            }
+        }
+        let errors: Vec<_> = artists
+            .iter()
+            .filter_map(|name| {
+                self.failures.get(&artist_key(name)).map(|error| {
+                    if artists.len() == 1 {
+                        error.clone()
+                    } else {
+                        format!("{name}: {error}")
+                    }
+                })
+            })
+            .collect();
+        self.error = (!errors.is_empty()).then(|| errors.join("; "));
+        if !self.artist_matches.is_empty() {
+            self.loading = false;
+            self.deadline = None;
+            return;
+        }
+        let next = artists.iter().find(|name| {
+            let key = artist_key(name);
+            !self.failures.contains_key(&key)
+                && match self.cache.get(&key) {
+                    None => true,
+                    Some(titles) => {
+                        other_song_count(titles, &self.title) <= (self.page + 1) * limit
+                            && self
+                                .sources
+                                .get(&key)
+                                .is_some_and(|source| source.next_offset.is_some())
+                    }
+                }
+        });
+        let Some(next) = next else {
+            self.loading = false;
+            self.deadline = None;
+            return;
+        };
+        self.loading = true;
+        if artist_key(next) != artist_key(&self.current_artist) {
+            self.current_artist = next.clone();
+            self.selected_artist_id = None;
+            self.deadline.get_or_insert(now + SETTLE_DELAY);
+        }
+        if self.lookup.is_none() {
+            let deadline = self.deadline.get_or_insert(now + SETTLE_DELAY);
+            if now >= *deadline {
+                let artist = self.current_artist.clone();
+                let source = self.sources.get(&artist_key(&artist));
+                let artist_id = source
+                    .map(|source| source.artist_id.clone())
+                    .or_else(|| self.selected_artist_id.take());
+                let offset = source.and_then(|source| source.next_offset).unwrap_or(0);
+                self.lookup = Some(Lookup::spawn("MusicBrainz", move || {
+                    recordings(artist, artist_id, offset)
+                }));
+                self.deadline = None;
             }
         }
     }
 
     pub fn retry(&mut self) {
-        self.cache.remove(&normalize(&self.artist));
+        for artist in self.lookup_artists() {
+            self.cache.remove(&artist_key(&artist));
+            self.sources.remove(&artist_key(&artist));
+        }
+        self.page = 0;
         self.lookup = None;
+        self.songs.clear();
+        self.song_artists.clear();
         self.artist_matches.clear();
         self.selected_artist_id = None;
+        self.current_artist.clear();
+        self.failures.clear();
         self.error = None;
-        self.loading = !self.artist.is_empty();
+        self.loading = !self.lookup_artists().is_empty();
         self.deadline = self.loading.then_some(Instant::now() + SETTLE_DELAY);
     }
+}
+
+fn artist_names(value: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && seen.insert(artist_key(name)))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn normalize(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
-fn other_songs(titles: &[String], current: &str, limit: usize) -> Vec<String> {
+fn artist_key(value: &str) -> String {
+    normalize(value)
+        .chars()
+        .map(|character| match character {
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}'
+            | '\u{fe63}' | '\u{ff0d}' => '-',
+            _ => character,
+        })
+        .collect()
+}
+
+fn other_song_count(titles: &[String], current: &str) -> usize {
     let current = normalize(current);
     titles
         .iter()
         .filter(|title| normalize(title) != current)
+        .count()
+}
+
+fn song_page(titles: &[String], current: &str, page: usize, limit: usize) -> Vec<String> {
+    let current = normalize(current);
+    titles
+        .iter()
+        .filter(|title| normalize(title) != current)
+        .skip(page * limit)
         .take(limit)
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+fn other_songs(titles: &[String], current: &str, limit: usize) -> Vec<String> {
+    song_page(titles, current, 0, limit)
 }
 
 fn artist_query(artist: &str) -> String {
@@ -161,6 +413,7 @@ fn artist_query(artist: &str) -> String {
 
 #[derive(Deserialize)]
 struct RecordingResponse {
+    count: usize,
     recordings: Vec<Recording>,
 }
 
@@ -212,11 +465,11 @@ struct ArtistResponse {
 }
 
 fn artist_candidates(response: ArtistResponse, name: &str) -> Vec<ArtistMatch> {
-    let name_key = normalize(name);
+    let name_key = artist_key(name);
     response
         .artists
         .into_iter()
-        .filter(|artist| normalize(&artist.name) == name_key)
+        .filter(|artist| artist_key(&artist.name) == name_key)
         .collect()
 }
 
@@ -242,7 +495,11 @@ fn recording_titles(response: RecordingResponse, artist_id: &str) -> Result<Vec<
     Ok(titles)
 }
 
-async fn recordings(artist: String, artist_id: Option<String>) -> Result<MusicBrainzResult> {
+async fn recordings(
+    artist: String,
+    artist_id: Option<String>,
+    offset: usize,
+) -> Result<MusicBrainzResult> {
     let client = reqwest::Client::builder()
         .user_agent(concat!(
             "ytune/",
@@ -265,10 +522,34 @@ async fn recordings(artist: String, artist_id: Option<String>) -> Result<MusicBr
         };
         artist.id
     };
-    let response = musicbrainz_get(&client, "recording", format!("arid:\"{artist_id}\"")).await?;
-    Ok(MusicBrainzResult::Recordings(recording_titles(
-        response, &artist_id,
-    )?))
+    let response: RecordingResponse = musicbrainz_get_at(
+        &client,
+        "recording",
+        format!("arid:\"{artist_id}\""),
+        offset,
+    )
+    .await?;
+    recording_batch(response, artist_id, offset)
+}
+
+fn recording_batch(
+    response: RecordingResponse,
+    artist_id: String,
+    offset: usize,
+) -> Result<MusicBrainzResult> {
+    let received = response.recordings.len();
+    let next_offset = offset + received;
+    if received == 0 && next_offset < response.count {
+        bail!(
+            "MusicBrainz returned an empty page before the end of the recordings; press f to retry"
+        );
+    }
+    let next_offset = (next_offset < response.count).then_some(next_offset);
+    Ok(MusicBrainzResult::Page {
+        titles: recording_titles(response, &artist_id)?,
+        artist_id,
+        next_offset,
+    })
 }
 
 async fn musicbrainz_get<T: DeserializeOwned>(
@@ -276,11 +557,21 @@ async fn musicbrainz_get<T: DeserializeOwned>(
     resource: &str,
     query: String,
 ) -> Result<T> {
+    musicbrainz_get_at(client, resource, query, 0).await
+}
+
+async fn musicbrainz_get_at<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    resource: &str,
+    query: String,
+    offset: usize,
+) -> Result<T> {
     let request = client
         .get(format!("https://musicbrainz.org/ws/2/{resource}/"))
         .query(&[
             ("query", query),
             ("fmt", "json".to_owned()),
+            ("offset", offset.to_string()),
             (
                 "limit",
                 if resource == "artist" { "25" } else { "100" }.to_owned(),
@@ -622,6 +913,470 @@ pub(crate) mod tests {
         .unwrap()
     }
 
+    pub fn multi_artist_results() -> RelatedSongs {
+        let mut related = RelatedSongs::default();
+        let now = Instant::now();
+        let artists = "Artist One, Artist Two";
+        related.update(artists, "Current", now, 2);
+        for (index, unique) in ["First", "Second"].into_iter().enumerate() {
+            related.choose_artist(index);
+            related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(vec![
+                "Current".into(),
+                "Shared".into(),
+                unique.into(),
+                "Extra".into(),
+            ]))));
+            related.update(artists, "Current", now, 2);
+            related.open_artist_picker();
+        }
+        related.choose_artist(0);
+        related
+    }
+
+    #[test]
+    fn artist_matching_accepts_unicode_hyphens_without_matching_other_names() -> Result<()> {
+        for dash in [
+            '-', '\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}', '\u{2212}',
+            '\u{fe63}', '\u{ff0d}',
+        ] {
+            let response = serde_json::from_value(json!({
+                "artists": [
+                    {"id": "duo", "name": format!("Sachin{dash}Jigar")},
+                    {"id": "other", "name": "Sachin"},
+                    {"id": "different", "name": "Sachin Jigar"}
+                ]
+            }))?;
+            let candidates = artist_candidates(response, " sachin-jigar ");
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].id, "duo");
+        }
+        let ambiguous = serde_json::from_value(json!({
+            "artists": [
+                {"id": "first", "name": "Sachin-Jigar"},
+                {"id": "second", "name": "Sachin\u{2010}Jigar"}
+            ]
+        }))?;
+        assert_eq!(artist_candidates(ambiguous, "Sachin-Jigar").len(), 2);
+        assert_eq!(
+            artist_names("Sachin-Jigar, Sachin\u{2010}Jigar, Arijit Singh, Amitabh Bhattacharya"),
+            ["Sachin-Jigar", "Arijit Singh", "Amitabh Bhattacharya"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hyphenated_artists_share_cache_entries_when_selected_individually() {
+        let now = Instant::now();
+        let mut related = RelatedSongs::default();
+        let artists = "Sachin-Jigar, Arijit Singh, Amitabh Bhattacharya";
+        related.update(artists, "", now, 1);
+        for (index, (artist, title)) in [
+            ("Sachin-Jigar", "Thumkeshwari"),
+            ("Arijit Singh", "Arijit song"),
+            ("Amitabh Bhattacharya", "Amitabh song"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(!related.loading);
+            assert!(related.lookup.is_none());
+            related.choose_artist(index);
+            assert_eq!(related.lookup_artist(), artist);
+            related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(vec![
+                title.into(),
+            ]))));
+            related.update(artists, "", now, 1);
+            assert_eq!(related.songs, [title]);
+            related.open_artist_picker();
+        }
+        related.choose_artist(0);
+        assert_eq!(related.songs.len(), 1);
+        assert_eq!(related.songs[0], "Thumkeshwari");
+        assert_eq!(related.song_artist(0), "Sachin-Jigar");
+        assert!(!related.loading);
+        related.update("Sachin\u{2010}Jigar", "", now, 1);
+        assert_eq!(related.songs, ["Thumkeshwari"]);
+        assert_eq!(related.song_artist(0), "Sachin\u{2010}Jigar");
+        assert!(!related.loading);
+        assert!(related.lookup.is_none());
+        related.retry();
+        assert!(!related.cache.contains_key("sachin-jigar"));
+        assert!(related.loading);
+        related.update("Sachin-Jigar", "", now, 1);
+        assert_eq!(related.lookup_artist(), "Sachin-Jigar");
+        assert!(related.songs.is_empty());
+    }
+
+    #[test]
+    #[ignore = "Requires MusicBrainz network access"]
+    fn real_sachin_jigar_lookup_matches_unicode_hyphen_and_returns_recordings() -> Result<()> {
+        let lookup = Lookup::spawn("MusicBrainz", || recordings("Sachin-Jigar".into(), None, 0));
+        let result = lookup
+            .results
+            .recv_timeout(Duration::from_secs(65))?
+            .map_err(anyhow::Error::msg)?;
+        let MusicBrainzResult::Page {
+            titles,
+            artist_id,
+            next_offset,
+        } = result
+        else {
+            bail!("Expected recordings for the Sachin-Jigar duo, not ambiguous artist choices");
+        };
+        assert!(
+            !titles.is_empty(),
+            "No recordings returned for Sachin-Jigar"
+        );
+        println!("Retrieved {} Sachin-Jigar recordings", titles.len());
+        if let Some(offset) = next_offset {
+            let lookup = Lookup::spawn("MusicBrainz", move || {
+                recordings("Sachin-Jigar".into(), Some(artist_id), offset)
+            });
+            let result = lookup
+                .results
+                .recv_timeout(Duration::from_secs(65))?
+                .map_err(anyhow::Error::msg)?;
+            let MusicBrainzResult::Page { titles: next, .. } = result else {
+                bail!("Expected the next batch of Sachin-Jigar recordings");
+            };
+            assert!(next.iter().any(|title| !titles.contains(title)));
+            println!("Retrieved {} recordings at offset {offset}", next.len());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn paging_selected_artist_reuses_cached_pages_and_resets_when_switching() {
+        let now = Instant::now();
+        let mut related = multi_artist_results();
+        assert_eq!(related.page_number(), 1);
+        assert!(related.has_next_page());
+        assert!(!related.turn_page(true, now, 2));
+        assert!(related.turn_page(false, now, 2));
+        assert_eq!(related.page_number(), 2);
+        assert_eq!(related.songs, ["Extra"]);
+        assert_eq!(related.song_artist(0), "Artist One");
+        assert!(!related.has_next_page());
+        assert!(!related.turn_page(false, now, 2));
+        assert!(related.turn_page(true, now, 2));
+        assert_eq!(related.songs, ["Shared", "First"]);
+        assert!(related.lookup.is_none());
+        related.loading = true;
+        assert!(!related.turn_page(false, now, 2));
+        related.loading = false;
+        related.artist_matches = vec![sample_artist("id", "Ambiguous")];
+        assert!(!related.turn_page(false, now, 2));
+        related.artist_matches.clear();
+        assert!(related.turn_page(false, now, 2));
+        assert!(related.open_artist_picker());
+        assert!(!related.turn_page(false, now, 2));
+        related.choose_artist(1);
+        assert_eq!(related.page_number(), 1);
+        assert_eq!(related.songs, ["Shared", "Second"]);
+        assert!(related.turn_page(false, now, 2));
+        related.update("Artist One, Artist Two", "Shared", now, 2);
+        assert_eq!(related.page_number(), 1);
+        assert!(related.turn_page(false, now, 2));
+        related.update("Artist One, Artist Two", "Shared", now, 1);
+        assert_eq!(related.page_number(), 1);
+        assert!(related.turn_page(false, now, 1));
+        related.update("Artist One", "Shared", now, 1);
+        assert_eq!(related.page_number(), 1);
+        assert!(related.turn_page(false, now, 1));
+        related.retry();
+        assert_eq!(related.page_number(), 1);
+    }
+
+    #[test]
+    fn paging_fetches_beyond_one_hundred_and_deduplicates_across_batches() {
+        let now = Instant::now();
+        let mut related = RelatedSongs::default();
+        related.update("Artist", "Current", now, 100);
+        let mut titles = vec!["Current".into()];
+        titles.extend((1..100).map(|index| format!("Song {index}")));
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Page {
+            titles,
+            artist_id: "chosen-id".into(),
+            next_offset: Some(100),
+        })));
+        related.update("Artist", "Current", now, 100);
+        assert!(related.loading);
+        assert_eq!(related.songs.len(), 99);
+        assert!(!related.turn_page(false, now, 100));
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Page {
+            titles: vec![" song 99 ".into(), "Song 100".into(), "Song 101".into()],
+            artist_id: "chosen-id".into(),
+            next_offset: Some(103),
+        })));
+        related.update("Artist", "Current", now, 100);
+        assert!(!related.loading);
+        assert_eq!(related.songs.len(), 100);
+        assert_eq!(related.sources["artist"].artist_id, "chosen-id");
+        assert_eq!(related.sources["artist"].next_offset, Some(103));
+        assert!(related.turn_page(false, now, 100));
+        assert_eq!(related.page_number(), 2);
+        assert_eq!(related.songs, ["Song 101"]);
+        assert!(related.loading);
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Page {
+            titles: vec!["Song 101".into(), "Last song".into()],
+            artist_id: "chosen-id".into(),
+            next_offset: None,
+        })));
+        related.update("Artist", "Current", now, 100);
+        assert_eq!(related.songs, ["Song 101", "Last song"]);
+        assert!(!related.loading);
+        assert!(!related.has_next_page());
+        assert!(related.turn_page(true, now, 100));
+        assert_eq!(related.songs.len(), 100);
+        assert!(related.lookup.is_none());
+    }
+
+    #[test]
+    fn selected_artist_paging_preserves_pages_on_fetch_errors() {
+        let now = Instant::now();
+        let mut related = multi_artist_results();
+        related.open_artist_picker();
+        related.choose_artist(1);
+        assert!(related.turn_page(false, now, 2));
+        assert_eq!(related.songs, ["Extra"]);
+        assert_eq!(related.song_artist(0), "Artist Two");
+        related.sources.insert(
+            artist_key("Artist Two"),
+            RecordingSource {
+                artist_id: "two".into(),
+                next_offset: Some(100),
+            },
+        );
+        related.update("Artist One, Artist Two", "Current", now, 2);
+        assert!(related.loading);
+        related.lookup = Some(Lookup::completed(Err("Offline".into())));
+        related.update("Artist One, Artist Two", "Current", now, 2);
+        assert!(!related.loading);
+        assert_eq!(related.songs, ["Extra"]);
+        assert_eq!(related.error.as_deref(), Some("Offline"));
+        assert!(related.turn_page(true, now, 2));
+        assert_eq!(related.songs, ["Shared", "Second"]);
+    }
+
+    #[test]
+    fn recording_batches_advance_by_raw_result_count_not_distinct_title_count() -> Result<()> {
+        let response = serde_json::from_value(json!({
+            "count": 105,
+            "recordings": [
+                {"title": "Song", "artist-credit": [{"artist": {"id": "id", "name": "Artist"}}]},
+                {"title": "Song", "artist-credit": [{"artist": {"id": "id", "name": "Artist"}}]},
+                {"title": "Other artist", "artist-credit": [{"artist": {"id": "other", "name": "Other"}}]}
+            ]
+        }))?;
+        let MusicBrainzResult::Page {
+            titles,
+            next_offset,
+            ..
+        } = recording_batch(response, "id".into(), 100)?
+        else {
+            panic!("Expected a recording batch");
+        };
+        assert_eq!(titles, ["Song"]);
+        assert_eq!(next_offset, Some(103));
+        let empty = serde_json::from_value(json!({"count": 105, "recordings": []}))?;
+        assert!(recording_batch(empty, "id".into(), 103).is_err());
+        let end = serde_json::from_value(json!({"count": 105, "recordings": []}))?;
+        assert!(matches!(
+            recording_batch(end, "id".into(), 105)?,
+            MusicBrainzResult::Page {
+                next_offset: None,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_artists_wait_for_selection_without_starting_a_lookup() {
+        let now = Instant::now();
+        let mut related = RelatedSongs::default();
+        let artists = "Sachin-Jigar, Arijit Singh, Amitabh Bhattacharya";
+        related.update(artists, "Current", now, 5);
+        related.update(artists, "Current", now + Duration::from_secs(10), 5);
+        assert_eq!(
+            related.artist_choices,
+            ["Sachin-Jigar", "Arijit Singh", "Amitabh Bhattacharya"]
+        );
+        assert_eq!(related.item_count(), 3);
+        assert!(related.lookup.is_none());
+        assert!(related.deadline.is_none());
+        assert!(!related.loading);
+        assert!(related.songs.is_empty());
+        assert!(!related.turn_page(false, now, 5));
+        related.retry();
+        assert_eq!(related.artist_choices.len(), 3);
+        assert!(!related.loading);
+        related.choose_artist(1);
+        assert_eq!(related.lookup_artist(), "Arijit Singh");
+        assert!(related.artist_choices.is_empty());
+        assert!(related.loading);
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(vec![
+            "Arijit song".into(),
+        ]))));
+        related.update(artists, "Current", now, 5);
+        assert_eq!(related.songs, ["Arijit song"]);
+        assert_eq!(related.song_artist(0), "Arijit Singh");
+        assert!(!related.loading);
+        assert!(!related.cache.contains_key("sachin-jigar"));
+        assert!(!related.cache.contains_key("amitabh bhattacharya"));
+    }
+
+    #[test]
+    fn switching_artist_cancels_stale_lookup_and_keeps_other_artists_caches() {
+        let now = Instant::now();
+        let mut related = multi_artist_results();
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(vec![
+            "Stale".into(),
+        ]))));
+        related.loading = true;
+        assert!(related.open_artist_picker());
+        assert!(related.lookup.is_none());
+        assert!(!related.loading);
+        related.choose_artist(1);
+        assert_eq!(related.songs, ["Shared", "Second"]);
+        assert!(!related.loading);
+        assert!(related.lookup.is_none());
+        related.retry();
+        assert!(related.cache.contains_key("artist one"));
+        assert!(!related.cache.contains_key("artist two"));
+        related.open_artist_picker();
+        related.choose_artist(0);
+        assert_eq!(related.songs, ["Shared", "First"]);
+        related.update("Solo artist", "Current", now, 2);
+        assert!(related.artist_choices.is_empty());
+        assert!(related.loading);
+        assert!(!related.open_artist_picker());
+        related.update("Artist One, Artist Two", "Current", now, 2);
+        assert_eq!(related.artist_choices.len(), 2);
+        assert!(!related.loading);
+        assert!(related.songs.is_empty());
+        related.update("", "", now, 2);
+        assert!(related.artist_choices.is_empty());
+        assert!(!related.loading);
+    }
+
+    #[test]
+    fn comma_separated_artists_have_independent_limits_caches_and_song_owners() {
+        assert_eq!(
+            artist_names(" , Artist One,artist one, Artist Two, , ARTIST TWO,"),
+            ["Artist One", "Artist Two"]
+        );
+        let now = Instant::now();
+        let mut related = multi_artist_results();
+        assert_eq!(related.songs, ["Shared", "First"]);
+        assert_eq!(related.song_artist(0), "Artist One");
+        assert!(!related.loading);
+        assert!(related.lookup.is_none());
+        related.update(" Artist One, artist one, Artist Two, ", "Current", now, 1);
+        assert_eq!(related.songs, ["Shared"]);
+        assert_eq!(related.song_artist(0), "Artist One");
+        assert!(!related.loading);
+        related.update("Artist Two, Artist One", "Shared", now, 2);
+        assert!(related.songs.is_empty());
+        assert_eq!(related.artist_choices, ["Artist Two", "Artist One"]);
+        related.choose_artist(0);
+        assert_eq!(related.songs, ["Current", "Second"]);
+        assert_eq!(related.song_artist(0), "Artist Two");
+        assert!(!related.loading);
+        related.update("Artist One", "Current", now, 2);
+        assert_eq!(related.songs, ["Shared", "First"]);
+        related.update(" , , ", "", now, 2);
+        assert!(related.songs.is_empty());
+        assert!(related.song_artists.is_empty());
+        assert!(!related.loading);
+    }
+
+    #[test]
+    fn selected_metadata_artist_can_be_disambiguated_before_fetching_recordings() {
+        let now = Instant::now();
+        let mut related = RelatedSongs::default();
+        let artists = "First, Artist, Last";
+        related.update(artists, "", now, 1);
+        related.choose_artist(1);
+        assert_eq!(related.lookup_artist(), "Artist");
+        assert!(related.loading);
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Artists(vec![
+            sample_artist("one", "First band"),
+            sample_artist("two", "Second band"),
+        ]))));
+        related.update(artists, "", now, 1);
+        assert!(related.songs.is_empty());
+        assert_eq!(related.item_count(), 2);
+        assert_eq!(related.lookup_artist(), "Artist");
+        assert!(!related.loading);
+        related.choose_artist(1);
+        assert_eq!(related.selected_artist_id.as_deref(), Some("two"));
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(vec![
+            "Chosen song".into(),
+        ]))));
+        related.update(artists, "", now, 1);
+        assert_eq!(related.songs, ["Chosen song"]);
+        assert_eq!(related.song_artist(0), "Artist");
+        assert!(!related.loading);
+        related.open_artist_picker();
+        related.choose_artist(2);
+        assert_eq!(related.lookup_artist(), "Last");
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(vec![
+            "Last song".into(),
+        ]))));
+        related.update(artists, "", now, 1);
+        assert_eq!(related.songs, ["Last song"]);
+        assert_eq!(related.song_artist(0), "Last");
+        assert!(!related.loading);
+        assert!(related.artist_matches.is_empty());
+    }
+
+    #[test]
+    fn failed_artists_can_be_switched_and_retry_refreshes_only_selected_artist() {
+        let now = Instant::now();
+        let mut related = RelatedSongs::default();
+        let artists = "Offline artist, Empty artist, Working artist";
+        related.update(artists, "", now, 5);
+        related.choose_artist(0);
+        related.lookup = Some(Lookup::completed(Err("Offline".into())));
+        related.update(artists, "", now, 5);
+        assert_eq!(related.error.as_deref(), Some("Offline"));
+        assert!(!related.loading);
+        related.open_artist_picker();
+        related.choose_artist(1);
+        assert_eq!(related.lookup_artist(), "Empty artist");
+        assert!(related.loading);
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(vec![]))));
+        related.update(artists, "", now, 5);
+        assert!(!related.loading);
+        related.open_artist_picker();
+        related.choose_artist(2);
+        assert_eq!(related.lookup_artist(), "Working artist");
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(vec![
+            "Available".into(),
+        ]))));
+        related.update(artists, "", now, 5);
+        assert_eq!(related.songs, ["Available"]);
+        assert_eq!(related.song_artist(0), "Working artist");
+        assert!(related.error.is_none());
+        assert!(!related.loading);
+        related.retry();
+        assert!(related.cache.contains_key("empty artist"));
+        assert!(!related.cache.contains_key("working artist"));
+        assert!(related.failures.is_empty());
+        assert!(related.songs.is_empty());
+        assert!(related.error.is_none());
+        related.update(artists, "", now, 5);
+        assert_eq!(related.lookup_artist(), "Working artist");
+        related.lookup = Some(Lookup::completed(Ok(MusicBrainzResult::Recordings(vec![
+            "Stale".into(),
+        ]))));
+        related.update("New artist", "", now, 5);
+        assert!(related.lookup.is_none());
+        assert!(related.songs.is_empty());
+        assert_eq!(related.lookup_artist(), "New artist");
+    }
+
     #[test]
     fn ambiguous_artist_choices_fetch_the_selected_id_and_cache_its_songs() {
         let now = Instant::now();
@@ -673,27 +1428,30 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "Requires network access to MusicBrainz"]
     fn real_musicbrainz_recordings_lookup() -> Result<()> {
-        let lookup = Lookup::spawn("MusicBrainz", move || recordings("Queen".into(), None));
+        let lookup = Lookup::spawn("MusicBrainz", move || recordings("Queen".into(), None, 0));
         let result = lookup
             .results
             .recv_timeout(Duration::from_secs(65))?
             .map_err(anyhow::Error::msg)?;
         let titles = match result {
-            MusicBrainzResult::Recordings(titles) => titles,
+            MusicBrainzResult::Recordings(titles) | MusicBrainzResult::Page { titles, .. } => {
+                titles
+            }
             MusicBrainzResult::Artists(artists) => {
                 let artist = artists
                     .into_iter()
                     .find(|artist| artist.disambiguation.as_deref() == Some("UK rock group"))
                     .context("Queen's UK rock group was not in the artist choices")?;
                 let lookup = Lookup::spawn("MusicBrainz", move || {
-                    recordings("Queen".into(), Some(artist.id))
+                    recordings("Queen".into(), Some(artist.id), 0)
                 });
                 match lookup
                     .results
                     .recv_timeout(Duration::from_secs(65))?
                     .map_err(anyhow::Error::msg)?
                 {
-                    MusicBrainzResult::Recordings(titles) => titles,
+                    MusicBrainzResult::Recordings(titles)
+                    | MusicBrainzResult::Page { titles, .. } => titles,
                     MusicBrainzResult::Artists(_) => {
                         bail!("Expected recordings for the chosen artist")
                     }
@@ -749,7 +1507,7 @@ pub(crate) mod tests {
             "title": "Unrelated",
             "artist-credit": [{"name": "Artist", "artist": {"id": "different-id", "name": "Artist"}}]
         }));
-        let response = serde_json::from_value(json!({"recordings": rows}))?;
+        let response = serde_json::from_value(json!({"count": rows.len(), "recordings": rows}))?;
         let titles = recording_titles(response, "artist-id")?;
         assert_eq!(
             other_songs(&titles, "current", 5),

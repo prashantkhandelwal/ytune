@@ -66,6 +66,14 @@ pub struct AddForm {
     pub error: Option<String>,
 }
 
+pub struct EditForm {
+    pub fields: [String; 4],
+    pub focus: usize,
+    pub error: Option<String>,
+    category: String,
+    url: String,
+}
+
 pub struct PathForm {
     pub path: String,
     pub error: Option<String>,
@@ -177,6 +185,7 @@ pub struct App {
     pub status: String,
     pub error: Option<String>,
     pub form: Option<AddForm>,
+    pub edit_form: Option<EditForm>,
     pub missing_ytdlp: Option<String>,
     pub export_form: Option<PathForm>,
     pub import_form: Option<PathForm>,
@@ -221,6 +230,7 @@ impl App {
             status: "Starting playback engine...".into(),
             error: None,
             form: None,
+            edit_form: None,
             missing_ytdlp: None,
             export_form: None,
             import_form: None,
@@ -268,6 +278,10 @@ impl App {
             self.handle_form(key);
             return;
         }
+        if self.edit_form.is_some() {
+            self.handle_edit(key);
+            return;
+        }
         if self.export_form.is_some() {
             self.handle_export(key);
             return;
@@ -282,20 +296,44 @@ impl App {
         }
         if self.related_focus {
             match key.code {
-                KeyCode::Esc | KeyCode::Char('d') => self.related_focus = false,
+                KeyCode::Esc => {
+                    if self.related.artist_choices.is_empty() && self.related.open_artist_picker() {
+                        self.related_selected = 0;
+                    } else {
+                        self.related_focus = false;
+                    }
+                }
+                KeyCode::Char('d') => self.related_focus = false,
                 KeyCode::Char('q') if key.modifiers.is_empty() => self.quit = true,
                 KeyCode::Down | KeyCode::Char('j') => {
                     self.related_selected = (self.related_selected + 1)
                         .min(self.related.item_count().saturating_sub(1));
                 }
                 KeyCode::Up => self.related_selected = self.related_selected.saturating_sub(1),
+                KeyCode::PageUp | KeyCode::PageDown => {
+                    if self.related.turn_page(
+                        key.code == KeyCode::PageUp,
+                        Instant::now(),
+                        self.settings.related_song_limit,
+                    ) {
+                        self.related_selected = 0;
+                    }
+                }
                 KeyCode::Char('f') => self.related.retry(),
+                KeyCode::Char('c') => {
+                    if self.related.open_artist_picker() {
+                        self.related_selected = 0;
+                    }
+                }
                 KeyCode::Char('r') => self.repeat = self.repeat.cycle(),
                 KeyCode::Char('+') | KeyCode::Char('=') => {
                     self.change_volume(f64::from(self.settings.volume_step))
                 }
                 KeyCode::Char('-') => self.change_volume(-f64::from(self.settings.volume_step)),
-                KeyCode::Enter if !self.related.artist_matches.is_empty() => {
+                KeyCode::Enter
+                    if !self.related.artist_choices.is_empty()
+                        || !self.related.artist_matches.is_empty() =>
+                {
                     self.related.choose_artist(self.related_selected);
                     self.related_selected = 0;
                 }
@@ -336,6 +374,7 @@ impl App {
                 }
             }
             KeyCode::Tab => self.toggle_category(),
+            KeyCode::Enter => self.open_edit(),
             KeyCode::Char(' ') => {
                 if self.selected_header.is_some() {
                     self.toggle_category();
@@ -434,6 +473,113 @@ impl App {
         }
     }
 
+    fn open_edit(&mut self) {
+        if self.selected_header.is_some() {
+            self.status = "Expand the category and select a track to edit".into();
+            return;
+        }
+        let Some((category, track)) = self.library.get(self.selected) else {
+            self.status = "Press a to add a YouTube video".into();
+            return;
+        };
+        let metadata = track.metadata.as_ref();
+        self.edit_form = Some(EditForm {
+            fields: [
+                track.title.clone(),
+                category.into(),
+                metadata
+                    .map(|m| m.artist_label().into())
+                    .unwrap_or_default(),
+                metadata.and_then(|m| m.album.clone()).unwrap_or_default(),
+            ],
+            focus: 0,
+            error: None,
+            category: category.into(),
+            url: track.url.clone(),
+        });
+    }
+
+    fn handle_edit(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.edit_form = None;
+            return;
+        }
+        if key.code == KeyCode::Enter {
+            self.save_edit();
+            return;
+        }
+        let Some(form) = &mut self.edit_form else {
+            return;
+        };
+        match key.code {
+            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1) % 4,
+            KeyCode::BackTab | KeyCode::Up => form.focus = (form.focus + 3) % 4,
+            KeyCode::Backspace => {
+                form.fields[form.focus].pop();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                form.fields[form.focus].clear();
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                form.fields[form.focus].push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn save_edit(&mut self) {
+        let Some(form) = &self.edit_form else {
+            return;
+        };
+        let mut updated = self.library.clone();
+        let result = (|| {
+            let index = updated
+                .index_of(&form.category, &form.url)
+                .context("This track is no longer in the library. Cancel and select it again.")?;
+            let index = updated.edit(index, &form.fields)?;
+            updated.save(&self.path)?;
+            Ok::<_, anyhow::Error>(index)
+        })();
+        match result {
+            Ok(index) => {
+                let is_current = self.playback.category == form.category
+                    && self
+                        .playback
+                        .track
+                        .as_ref()
+                        .is_some_and(|track| track.url == form.url);
+                self.library = updated;
+                self.selected = index;
+                self.selected_header = None;
+                self.collapsed
+                    .retain(|name| self.library.playlists.iter().any(|p| p.name == *name));
+                if let Some((category, track)) = self.library.get(index) {
+                    self.collapsed.remove(category);
+                    if is_current {
+                        self.playback.category = category.into();
+                        self.playback.title = track.title.clone();
+                        if let Some(metadata) = &track.metadata {
+                            self.playback.artist = metadata.artist_label().into();
+                            self.playback.album = metadata.album.clone().unwrap_or_default();
+                        }
+                        self.playback.track = Some(track.clone());
+                    }
+                }
+                self.edit_form = None;
+                self.status = "Audio details saved".into();
+            }
+            Err(error) => {
+                if let Some(form) = &mut self.edit_form {
+                    form.error = Some(format!("{error:#}"));
+                }
+            }
+        }
+    }
+
     fn search_related_song(&mut self) {
         let Some(title) = self.related.songs.get(self.related_selected) else {
             return;
@@ -447,7 +593,10 @@ impl App {
                 .unwrap_or_else(|| "Favorites".into())
         };
         self.youtube_search = Some(YoutubeSearch::start(
-            format!("{} {title}", self.related.artist),
+            format!(
+                "{} {title}",
+                self.related.song_artist(self.related_selected)
+            ),
             category,
             self.settings.executable(),
         ));
@@ -654,6 +803,8 @@ impl App {
         if let Some(form) = &mut self.settings_form {
             form.fields[form.focus].extend(text.chars().filter(|c| !c.is_control()));
         } else if let Some(form) = &mut self.form {
+            form.fields[form.focus].extend(text.chars().filter(|c| !c.is_control()));
+        } else if let Some(form) = &mut self.edit_form {
             form.fields[form.focus].extend(text.chars().filter(|c| !c.is_control()));
         } else if let Some(form) = self.export_form.as_mut().or(self.import_form.as_mut()) {
             form.path.extend(text.chars().filter(|c| !c.is_control()));
@@ -1219,7 +1370,12 @@ impl App {
             }
             Some("media-title") => {
                 if let Some(title) = data.as_str() {
-                    self.playback.title = title.to_string();
+                    self.playback.title = self
+                        .playback
+                        .track
+                        .as_ref()
+                        .map(|track| track.title.clone())
+                        .unwrap_or_else(|| title.to_string());
                 }
             }
             Some("duration") => {
@@ -1241,11 +1397,11 @@ impl App {
                     .as_ref()
                     .and_then(|track| track.metadata.as_ref())
                 {
-                    if self.playback.artist.is_empty() {
+                    if stored.artist.is_some() || !stored.artist_label().is_empty() {
                         self.playback.artist = stored.artist_label().to_string();
                     }
-                    if self.playback.album.is_empty() {
-                        self.playback.album = stored.album.clone().unwrap_or_default();
+                    if let Some(album) = &stored.album {
+                        self.playback.album = album.clone();
                     }
                 }
             }
@@ -1324,6 +1480,7 @@ pub(crate) mod tests {
             status: "Ready".into(),
             error: None,
             form: None,
+            edit_form: None,
             missing_ytdlp: None,
             export_form: None,
             import_form: None,
@@ -1344,6 +1501,160 @@ pub(crate) mod tests {
         app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
         // Control tests use settled playback; debounce tests send keys directly.
         app.start_pending_playback(Instant::now() + TRACK_SETTLE_DELAY);
+    }
+
+    #[test]
+    fn editing_details_persists_moves_and_keeps_playback_running() -> Result<()> {
+        let (mut app, _directory, commands, _events) = fixture();
+        let source_metadata = crate::metadata::tests::sample();
+        app.library.add_resolved(
+            "Old",
+            "Original",
+            "https://youtu.be/one",
+            source_metadata.clone(),
+        )?;
+        app.library.add("Other", "Two", "https://youtu.be/two")?;
+        key(&mut app, KeyCode::Char(' '));
+        while commands.try_recv().is_ok() {}
+        app.playback.position = 42.0;
+        app.playback.paused = true;
+        app.collapsed.insert("Other".into());
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.edit_form.as_ref().unwrap().fields[0], "Original");
+        assert_eq!(app.edit_form.as_ref().unwrap().fields[1], "Old");
+        assert_eq!(app.edit_form.as_ref().unwrap().fields[2], "Artist");
+        for (index, value) in ["Renamed", "Other", "New artist", "New album"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(app.edit_form.as_ref().unwrap().focus, index);
+            app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+            app.handle_paste(value);
+            key(&mut app, KeyCode::Tab);
+        }
+        key(&mut app, KeyCode::Enter);
+        assert!(app.edit_form.is_none());
+        assert_eq!(app.selected, 1);
+        assert!(app.selected_header.is_none());
+        assert!(!app.collapsed.contains("Other"));
+        assert_eq!(app.library.playlists.len(), 1);
+        let saved = Library::load(&app.path)?;
+        let (category, track) = saved.get(1).unwrap();
+        assert_eq!(category, "Other");
+        assert_eq!(track.title, "Renamed");
+        let mut expected = source_metadata;
+        expected.artist = Some("New artist".into());
+        expected.album = Some("New album".into());
+        assert_eq!(track.metadata.as_ref(), Some(&expected));
+        assert_eq!(app.playback.track.as_ref(), Some(track));
+        assert_eq!(app.playback.category, "Other");
+        assert!(app.playback.active);
+        assert!(app.playback.paused);
+        assert_eq!(app.playback.position, 42.0);
+        app.property_changed(&json!({"name": "media-title", "data": "Remote title"}));
+        app.property_changed(&json!({
+            "name": "metadata", "data": {"artist": "Remote artist", "album": "Remote album"}
+        }));
+        assert_eq!(app.playback.title, "Renamed");
+        assert_eq!(app.playback.artist, "New artist");
+        assert_eq!(app.playback.album, "New album");
+        assert!(commands.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn edit_cancellation_validation_and_save_failures_preserve_library() -> Result<()> {
+        let (mut app, directory, commands, _events) = fixture();
+        app.library.add("One", "Original", "https://youtu.be/one")?;
+        app.library
+            .add("Two", "Duplicate", "https://youtu.be/one")?;
+        app.library.save(&app.path)?;
+        let original = std::fs::read(&app.path)?;
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::BackTab);
+        assert_eq!(app.edit_form.as_ref().unwrap().focus, 3);
+        key(&mut app, KeyCode::Char('q'));
+        key(&mut app, KeyCode::Backspace);
+        assert!(!app.quit);
+        key(&mut app, KeyCode::Esc);
+        assert!(app.edit_form.is_none());
+        key(&mut app, KeyCode::Enter);
+        app.edit_form.as_mut().unwrap().fields[0].clear();
+        key(&mut app, KeyCode::Enter);
+        assert!(
+            app.edit_form
+                .as_ref()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("must not be empty")
+        );
+        app.edit_form.as_mut().unwrap().fields =
+            ["Changed".into(), "Two".into(), String::new(), String::new()];
+        key(&mut app, KeyCode::Enter);
+        assert!(
+            app.edit_form
+                .as_ref()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("already in this category")
+        );
+        app.edit_form.as_mut().unwrap().fields[1] = "New".into();
+        app.path = directory.path().to_path_buf();
+        key(&mut app, KeyCode::Enter);
+        assert!(app.edit_form.as_ref().unwrap().error.is_some());
+        assert_eq!(app.library.get(0).unwrap().1.title, "Original");
+        assert_eq!(
+            std::fs::read(directory.path().join("library.json"))?,
+            original
+        );
+        assert!(commands.try_recv().is_err());
+        key(&mut app, KeyCode::Esc);
+        app.selected_header = Some(0);
+        key(&mut app, KeyCode::Enter);
+        assert!(app.edit_form.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn edits_support_legacy_tracks_same_category_and_new_categories() -> Result<()> {
+        let (mut app, _directory, _commands, _events) = fixture();
+        app.library.add("Old", "One", "https://youtu.be/one")?;
+        app.library.add("Old", "Two", "https://youtu.be/two")?;
+        key(&mut app, KeyCode::Enter);
+        app.edit_form.as_mut().unwrap().fields = [
+            "New name".into(),
+            "Old".into(),
+            "Artist".into(),
+            "Album".into(),
+        ];
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.library.get(1).unwrap().1.title, "Two");
+        assert_eq!(
+            app.library
+                .get(0)
+                .unwrap()
+                .1
+                .metadata
+                .as_ref()
+                .unwrap()
+                .artist_label(),
+            "Artist"
+        );
+        key(&mut app, KeyCode::Enter);
+        app.edit_form.as_mut().unwrap().fields[1] = "New category".into();
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.library.get(1).unwrap().0, "New category");
+        assert_eq!(
+            Library::load(&app.path)?.get(1).unwrap().1.title,
+            "New name"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1462,6 +1773,96 @@ pub(crate) mod tests {
         key(&mut app, KeyCode::Esc);
         assert!(!app.related_focus);
         assert_eq!(app.library.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn escape_returns_from_songs_to_artist_picker_then_to_library() -> Result<()> {
+        let (mut app, _directory, commands, _events) = fixture();
+        app.settings.related_song_limit = 2;
+        app.related = crate::discovery::tests::multi_artist_results();
+        key(&mut app, KeyCode::Char('d'));
+        key(&mut app, KeyCode::PageDown);
+        assert_eq!(app.related.page_number(), 2);
+        key(&mut app, KeyCode::Esc);
+        assert!(app.related_focus);
+        assert_eq!(app.related.artist_choices, ["Artist One", "Artist Two"]);
+        assert_eq!(app.related_selected, 0);
+        assert_eq!(app.related.page_number(), 1);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.related.songs, ["Shared", "Second"]);
+        assert!(app.related.artist_choices.is_empty());
+        assert_eq!(app.related_selected, 0);
+        key(&mut app, KeyCode::Esc);
+        assert!(app.related_focus);
+        assert_eq!(app.related.artist_choices.len(), 2);
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.related_focus);
+        key(&mut app, KeyCode::Char('d'));
+        assert!(app.related_focus);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.related.songs, ["Shared", "First"]);
+        key(&mut app, KeyCode::Char('d'));
+        assert!(!app.related_focus);
+        assert!(commands.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn related_page_keys_reset_selection_and_search_the_correct_page() -> Result<()> {
+        let (mut app, directory, commands, _events) = fixture();
+        app.settings.ytdlp_path = Some(directory.path().join("missing-yt-dlp.exe"));
+        app.settings.related_song_limit = 2;
+        app.related = crate::discovery::tests::multi_artist_results();
+        key(&mut app, KeyCode::Char('d'));
+        app.related_selected = 3;
+        key(&mut app, KeyCode::PageDown);
+        assert_eq!(app.related.page_number(), 2);
+        assert_eq!(app.related_selected, 0);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::PageDown);
+        assert_eq!(app.related_selected, 0);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.youtube_search.as_ref().unwrap().query,
+            "Artist One Extra"
+        );
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::PageUp);
+        assert_eq!(app.related.page_number(), 1);
+        assert_eq!(app.related_selected, 0);
+        assert!(commands.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn multi_artist_song_search_uses_only_the_selected_songs_artist() -> Result<()> {
+        let (mut app, directory, _commands, _events) = fixture();
+        app.settings.ytdlp_path = Some(directory.path().join("missing-yt-dlp.exe"));
+        app.library
+            .add("Music", "Current", "https://youtu.be/current")?;
+        app.related = crate::discovery::tests::multi_artist_results();
+        key(&mut app, KeyCode::Char('d'));
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.youtube_search.as_ref().unwrap().query,
+            "Artist One Shared"
+        );
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.related_selected, 0);
+        assert_eq!(app.related.artist_choices, ["Artist One", "Artist Two"]);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        assert!(app.youtube_search.is_none());
+        assert_eq!(app.related_selected, 0);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        let search = app.youtube_search.as_ref().unwrap();
+        assert_eq!(search.query, "Artist Two Second");
+        assert_eq!(search.category, "Music");
+        key(&mut app, KeyCode::Esc);
         Ok(())
     }
 
@@ -1791,6 +2192,8 @@ pub(crate) mod tests {
         key(&mut app, KeyCode::Enter);
         assert!(commands.try_recv().is_err());
         assert!(!app.playback.active);
+        assert!(app.edit_form.is_some());
+        key(&mut app, KeyCode::Esc);
         key(&mut app, KeyCode::Char(' '));
         assert_eq!(
             commands.recv()?,
@@ -1807,7 +2210,7 @@ pub(crate) mod tests {
         })))?;
         app.poll_player();
         assert!(!app.playback.loading);
-        assert_eq!(app.playback.title, "Resolved title");
+        assert_eq!(app.playback.title, "One");
         assert_eq!(app.playback.duration, 120.0);
         key(&mut app, KeyCode::Char(' '));
         assert_eq!(commands.recv()?, json!(["cycle", "pause"]));
@@ -2098,6 +2501,8 @@ pub(crate) mod tests {
         key(&mut app, KeyCode::Down);
         key(&mut app, KeyCode::Enter);
         assert!(commands.try_recv().is_err());
+        assert!(app.edit_form.is_some());
+        key(&mut app, KeyCode::Esc);
         key(&mut app, KeyCode::Char(' '));
         assert_eq!(
             commands.recv()?,

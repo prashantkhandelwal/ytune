@@ -87,6 +87,7 @@ entire library. Collapse state lasts for the current session.
 | k | Open / close the player shortcuts dialog |
 | Home / End | Select first / last visible row |
 | Space | Play/pause selected track; toggle selected category |
+| Enter | Edit the selected track's song name, category, artist, and album |
 | Tab | Expand / collapse the selected category |
 | n / b | Play next / previous track (wrap around) |
 | r | Cycle repeat: Off, Track, All |
@@ -110,11 +111,28 @@ Fields are locked while metadata is resolving. Failed lookups or saves leave
 the dialog open with an error and do not add a partial track. Lookup times out
 after 60 seconds; fix the problem and press Enter to retry.
 
+Select a track in the library and press **Enter** to edit its saved audio
+details. **Tab / Shift+Tab** changes fields, **Ctrl+U** clears a field,
+**Backspace** deletes the last character, **Enter** saves, and **Esc** cancels.
+Changing the category moves the track to that category (creating it if needed).
+Song name and category are required; duplicate URLs in the destination category
+are rejected. Edits require no network lookup and do not interrupt playback.
+The original source title and other fetched metadata are preserved; a blank
+artist falls back to the saved uploader when available. Failed saves leave the
+editor open with an error and keep the library unchanged.
+
 ### Related songs
 
 Audio Details looks up other recordings by the displayed artist using
-[MusicBrainz](https://musicbrainz.org/). It shows up to **five** distinct song
-titles by default, configurable from **1** to **100** using **Related song limit**
+[MusicBrainz](https://musicbrainz.org/). When metadata contains multiple
+comma-separated artist names, choose which artist to look up before any
+MusicBrainz request is made: press **d**, select with **Up / Down**, and press
+**Enter**. A single artist is looked up automatically. Whitespace and empty
+entries are ignored, and repeated names are listed only once
+(case-insensitively, treating Unicode dash variants
+like ordinary hyphens). This also allows names such as `Sachin-Jigar` to match
+MusicBrainz's Unicode-hyphen spelling. It shows up to **five** distinct song
+titles **per page for the selected artist** by default, configurable from **1** to **100** using **Related song limit**
 in Settings. The current title is excluded when it matches. These are recordings by
 the same artist, not personalized recommendations or a popularity ranking.
 Artist names are taken from playback or saved metadata (with the uploader as
@@ -124,9 +142,25 @@ artists have the same name, **d**, **Up / Down**, and **Enter** let you choose
 the intended artist using MusicBrainz's disambiguation labels, rather than
 guessing. That artist's results are reused for the current session; **f**
 refreshes the lookup and lets you choose again.
+Results are labeled with the selected artist. Selecting a song searches YouTube
+using only that artist. Press **c** while browsing related songs to reopen the
+artist picker, including while a lookup is loading or has failed. Switching
+artists cancels the previous lookup, starts at page 1, and reuses cached songs
+for the chosen artist. Unselected artists are not looked up.
 
 Press **d** to focus the related-song list, **Up / Down** to select a song, and
-**Enter** to search YouTube inside the app. **Esc** returns to the library.
+**Enter** to search YouTube inside the app. For multiple artists, **Esc** returns
+from the songs to the artist picker without leaving the section. Press **Esc**
+again from the picker to return to the library. For a single artist, **Esc**
+returns directly to the library. **d** also returns directly to the library.
+Use **Page Down / Page Up** to move to the next / previous page for the selected
+artist. The footer shows the current page and whether more songs are available.
+Paging is disabled while loading or choosing an artist; selection resets on a page change.
+Previously loaded pages are cached. MusicBrainz recordings are fetched in batches
+of up to 100 as needed, so navigation is not restricted to the first 100 recordings.
+Titles are deduplicated across batches and the current song is excluded.
+Changing the artists, current song, or page size returns to page 1; **f** refreshes
+from page 1 and clears only the selected artist's cached recordings.
 On smaller terminals, focusing this list temporarily replaces the metadata
 view so the songs remain accessible by scrolling. Playback continues in the background.
 Use **+ / -** (or **=** to increase) to adjust volume by the configured step
@@ -146,7 +180,7 @@ five videos. Select a result with **Up / Down**, then:
 Lookups do not block navigation or playback. Artist changes cancel stale
 MusicBrainz lookups; results are cached per artist for the current session.
 MusicBrainz requests are spaced at least one second apart and include an
-identifying application User-Agent. The displayed artist name is sent to
+identifying application User-Agent. Only the selected artist name is sent to
 MusicBrainz; selecting a related title sends the artist and title to YouTube
 through yt-dlp. Errors and empty results are shown in the corresponding view.
 Temporary MusicBrainz failures (HTTP 429, 502, 503, or 504) are retried
@@ -240,10 +274,11 @@ Text is appended at the end of the active field.
 - **Seek interval:** a positive whole number of seconds; default **10**.
 - **Volume step:** a whole-number percentage from **1** to **100**; default **5**.
   Seek and volume changes take effect immediately without restarting playback.
-- **Related song limit:** a whole number from **1** to **100**; default **5**.
+- **Related song limit:** songs per artist per page, a whole number from **1** to **100**;
+  default **5** per artist.
   Changes take effect immediately, including cached MusicBrainz results, without
-  restarting playback. Fewer songs may be available after filtering the first
-  100 recordings for distinct titles and excluding the current song. YouTube
+  restarting playback. Further recording batches are fetched as needed after
+  filtering distinct titles and excluding the current song. YouTube
   search still returns up to five videos.
 
 Use **Tab / Shift+Tab** or **Up / Down** to navigate fields; on small terminals,

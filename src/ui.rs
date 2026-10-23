@@ -18,6 +18,7 @@ enum ShortcutMode {
     Playback,
     PlayerControls,
     Add,
+    Edit,
     Resolving,
     Export,
     Import,
@@ -48,6 +49,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ShortcutMode::Resolving
     } else if app.form.is_some() {
         ShortcutMode::Add
+    } else if app.edit_form.is_some() {
+        ShortcutMode::Edit
     } else if app.export_form.is_some() {
         ShortcutMode::Export
     } else if app.import_form.is_some() {
@@ -173,6 +176,71 @@ pub fn draw(frame: &mut Frame, app: &App) {
             }))
             .wrap(Wrap { trim: true }),
             fields[3],
+        );
+    }
+    if let Some(form) = &app.edit_form {
+        let width = area.width.saturating_sub(6).min(88);
+        let height = 18.min(area.height);
+        let popup = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Edit audio details | Enter: save | Esc: cancel ")
+            .border_style(Style::default().fg(ACCENT));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+        let fields = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+        for (index, label) in ["Song name", "Playlist / category", "Artist", "Album"]
+            .iter()
+            .enumerate()
+        {
+            let visible: String = form.fields[index]
+                .chars()
+                .rev()
+                .take(usize::from(fields[index].width.saturating_sub(3)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            frame.render_widget(
+                Paragraph::new(visible).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(*label)
+                        .border_style(Style::default().fg(if index == form.focus {
+                            ACCENT
+                        } else {
+                            Color::DarkGray
+                        })),
+                ),
+                fields[index],
+            );
+        }
+        frame.render_widget(
+            Paragraph::new(
+                form.error
+                    .as_deref()
+                    .unwrap_or("Tab/Shift+Tab: field | Ctrl+U: clear | No metadata lookup needed"),
+            )
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(if form.error.is_some() {
+                Color::LightRed
+            } else {
+                Color::Gray
+            })),
+            fields[4],
         );
     }
     if let Some((form, importing)) = app
@@ -496,7 +564,7 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(
         Paragraph::new(form.error.as_deref().unwrap_or(
-            "Blank executable: auto. Seek > 0; volume and song limit 1-100. Folder changes copy data; executable changes stop playback.",
+            "Blank executable: auto. Seek > 0; volume and songs per artist 1-100. Folder changes copy data; executable changes stop playback.",
         )).wrap(Wrap { trim: true }).style(Style::default().fg(
             if form.error.is_some() { Color::LightRed } else { Color::Gray },
         )),
@@ -576,7 +644,7 @@ fn youtube_dialog(frame: &mut Frame, app: &App, area: Rect) {
 
 fn shortcut_lines(mode: ShortcutMode, width: u16) -> Vec<Line<'static>> {
     let shortcuts: &[(&str, &str)] = match mode {
-        ShortcutMode::Add => &[
+        ShortcutMode::Add | ShortcutMode::Edit => &[
             ("Tab/Shift+Tab", "Field"),
             ("Enter", "Save"),
             ("Esc", "Cancel"),
@@ -595,11 +663,13 @@ fn shortcut_lines(mode: ShortcutMode, width: u16) -> Vec<Line<'static>> {
         ShortcutMode::Delete => &[("y", "Delete"), ("n/Esc", "Cancel"), ("q", "Quit")],
         ShortcutMode::Related => &[
             ("Up/Down", "Select"),
+            ("PgUp/PgDn", "Page"),
+            ("c", "Choose artist"),
             ("Enter", "Open"),
             ("+/-", "Volume"),
             ("f", "Retry"),
             ("r", "Repeat"),
-            ("Esc", "Library"),
+            ("Esc", "Back"),
             ("q", "Quit"),
         ],
         ShortcutMode::YoutubeSearch => &[
@@ -624,6 +694,7 @@ fn shortcut_lines(mode: ShortcutMode, width: u16) -> Vec<Line<'static>> {
         ShortcutMode::Playback => &[
             ("k", "Player controls"),
             ("a", "Add"),
+            ("Enter", "Edit details"),
             ("e", "Export"),
             ("i", "Import"),
             ("t", "Settings"),
@@ -751,12 +822,9 @@ fn library(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn details(frame: &mut Frame, app: &App, area: Rect) {
-    let mut block = Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
         .title(" Audio details ");
-    if !app.details_artist().trim().is_empty() && !app.related_focus {
-        block = block.title_bottom(" d: related songs ");
-    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let sections = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).split(inner);
@@ -841,26 +909,66 @@ fn details(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn related_songs(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::TOP)
-        .title(if !app.related.artist_matches.is_empty() {
-            " Choose artist - MusicBrainz | d: browse "
-        } else if app.related_focus {
-            " Related - MusicBrainz | Enter: search "
-        } else {
-            " Related - MusicBrainz | d: browse "
-        })
+        .title(
+            if !app.related.artist_choices.is_empty() || !app.related.artist_matches.is_empty() {
+                if app.related_focus {
+                    " Choose artist - MusicBrainz | Enter: select "
+                } else {
+                    " Choose artist - MusicBrainz | d: browse "
+                }
+            } else if app.related_focus {
+                " Related - MusicBrainz | Enter: search "
+            } else {
+                " Related - MusicBrainz | d: browse "
+            },
+        )
         .border_style(Style::default().fg(if app.related_focus {
             ACCENT
         } else {
             Color::Gray
         }));
+    let has_items = app.related.item_count() > 0;
+    {
+        let status = if !app.related.artist_choices.is_empty() {
+            Some(" Select an artist to look up songs ".into())
+        } else if !app.related.artist_matches.is_empty() {
+            Some(format!(" Choose: {} ", app.related.lookup_artist()))
+        } else if let Some(error) = &app.related.error {
+            Some(format!(" {error} "))
+        } else if app.related.loading {
+            Some(format!(" Looking up: {} ", app.related.lookup_artist()))
+        } else {
+            Some(if app.related.has_next_page() {
+                " PgDn: next ".into()
+            } else {
+                " Last page ".into()
+            })
+        };
+        if let Some(status) = status {
+            block = block.title_bottom(Line::styled(
+                if app.related.artist_choices.is_empty() {
+                    format!(" Page {} |{status}", app.related.page_number())
+                } else {
+                    status
+                },
+                Style::default().fg(if app.related.error.is_some() {
+                    Color::LightRed
+                } else {
+                    Color::Gray
+                }),
+            ));
+        }
+    }
     let message = if app.details_artist().trim().is_empty() {
         Some("No artist metadata. Select or play a track with an artist.")
+    } else if has_items {
+        None
     } else if let Some(error) = &app.related.error {
         Some(error.as_str())
     } else if app.related.loading {
-        Some("Looking up other recordings by this artist...")
+        Some("Looking up recordings for the selected artist...")
     } else if app.related.songs.is_empty() && app.related.artist_matches.is_empty() {
         Some("No other recordings found for this artist. Press f to retry.")
     } else {
@@ -879,11 +987,20 @@ fn related_songs(frame: &mut Frame, app: &App, area: Rect) {
             area,
         );
     } else {
-        let items: Vec<_> = if app.related.artist_matches.is_empty() {
+        let items: Vec<_> = if !app.related.artist_choices.is_empty() {
+            app.related
+                .artist_choices
+                .iter()
+                .map(|artist| ListItem::new(artist.as_str()))
+                .collect()
+        } else if app.related.artist_matches.is_empty() {
             app.related
                 .songs
                 .iter()
-                .map(|song| ListItem::new(song.as_str()))
+                .enumerate()
+                .map(|(index, song)| {
+                    ListItem::new(format!("{} - {song}", app.related.song_artist(index)))
+                })
                 .collect()
         } else {
             app.related
@@ -1054,6 +1171,133 @@ mod tests {
             assert!(content.contains("Artist - First band"));
             assert!(content.contains("Artist - Second band"));
             app.related.artist_matches.clear();
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selected_artist_results_show_owner_and_remain_visible_during_loading_and_errors()
+    -> anyhow::Result<()> {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        let mut metadata = crate::metadata::tests::sample();
+        metadata.artist = Some("Artist One, Artist Two".into());
+        app.library
+            .add_resolved("Music", "", "https://youtu.be/current", metadata)?;
+        app.related = crate::discovery::tests::multi_artist_results();
+        app.related_focus = true;
+        for (width, height) in [(64, 20), (110, 30)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+            for state in 0..3 {
+                app.related.loading = state == 1;
+                app.related.error = (state == 2).then(|| "Artist Three: Offline".into());
+                terminal.draw(|frame| draw(frame, &app))?;
+                let content = format!("{}", terminal.backend());
+                for label in ["Artist One - Shared", "Artist One - First"] {
+                    assert!(
+                        content.contains(label),
+                        "Missing {label} at {width} x {height}"
+                    );
+                }
+                if state == 1 {
+                    assert!(content.contains("Looking up: Artist One"));
+                } else if state == 2 {
+                    assert!(content.contains("Artist Three: Offline"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_artist_picker_renders_choices_and_reopens_without_losing_paging()
+    -> anyhow::Result<()> {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        let mut metadata = crate::metadata::tests::sample();
+        metadata.artist = Some("Artist One, Artist Two".into());
+        app.library
+            .add_resolved("Music", "", "https://youtu.be/current", metadata)?;
+        app.settings.related_song_limit = 2;
+        app.related_focus = true;
+        for (width, height) in [(64, 20), (110, 30)] {
+            app.related = crate::discovery::tests::multi_artist_results();
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+            terminal.draw(|frame| related_songs(frame, &app, frame.area()))?;
+            let content = format!("{}", terminal.backend());
+            for label in [
+                "Choose artist - MusicBrainz | Enter: select",
+                "Artist One",
+                "Artist Two",
+                "Select an artist",
+            ] {
+                assert!(
+                    content.contains(label),
+                    "Missing {label} at {width} x {height}"
+                );
+            }
+            assert!(!content.contains("Last page"));
+            assert!(!content.contains("Artist One - Shared"));
+            app.related_focus = false;
+            terminal.draw(|frame| related_songs(frame, &app, frame.area()))?;
+            assert!(
+                format!("{}", terminal.backend())
+                    .contains("Choose artist - MusicBrainz | d: browse")
+            );
+            app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+            terminal.draw(|frame| related_songs(frame, &app, frame.area()))?;
+            assert!(
+                format!("{}", terminal.backend())
+                    .contains("Choose artist - MusicBrainz | Enter: select")
+            );
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            terminal.draw(|frame| draw(frame, &app))?;
+            let content = format!("{}", terminal.backend());
+            assert!(content.contains("Artist Two - Second"));
+            assert!(!content.contains("Artist One - First"));
+            app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+            terminal.draw(|frame| draw(frame, &app))?;
+            let content = format!("{}", terminal.backend());
+            assert!(content.contains("Page 2"));
+            assert!(content.contains("Artist Two - Extra"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn related_paging_controls_and_page_status_fit_supported_terminal_sizes() -> anyhow::Result<()>
+    {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        let mut metadata = crate::metadata::tests::sample();
+        metadata.artist = Some("Artist One, Artist Two".into());
+        app.library
+            .add_resolved("Music", "", "https://youtu.be/current", metadata)?;
+        app.settings.related_song_limit = 2;
+        app.related_focus = true;
+        for (width, height) in [(64, 20), (110, 30)] {
+            app.related = crate::discovery::tests::multi_artist_results();
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+            terminal.draw(|frame| draw(frame, &app))?;
+            let content = format!("{}", terminal.backend());
+            assert!(content.contains("PgUp/PgDn"));
+            assert!(content.contains("Page 1"));
+            assert!(content.contains("PgDn: next"));
+            app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+            terminal.draw(|frame| draw(frame, &app))?;
+            let content = format!("{}", terminal.backend());
+            assert!(content.contains("Page 2"));
+            assert!(content.contains("Last page"));
+            assert!(content.contains("Artist One - Extra"));
+            assert!(!content.contains("Artist Two - Extra"));
+            assert!(!content.contains("Artist One - Shared"));
         }
         Ok(())
     }
@@ -1314,11 +1558,47 @@ mod tests {
     }
 
     #[test]
+    fn audio_editor_renders_all_fields_and_errors_at_supported_sizes() -> anyhow::Result<()> {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        app.library
+            .add("Favorites", "My song", "https://youtu.be/one")?;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for (width, height) in [(64, 20), (110, 30), (160, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+            terminal.draw(|frame| draw(frame, &app))?;
+            let content = format!("{}", terminal.backend());
+            for label in [
+                "Edit audio details",
+                "Song name",
+                "Playlist / category",
+                "Artist",
+                "Album",
+                "My song",
+                "Favorites",
+            ] {
+                assert!(
+                    content.contains(label),
+                    "Missing {label} at {width} x {height}"
+                );
+            }
+            app.edit_form.as_mut().unwrap().error = Some("Cannot save audio details".into());
+            terminal.draw(|frame| draw(frame, &app))?;
+            assert!(format!("{}", terminal.backend()).contains("Cannot save audio details"));
+            app.edit_form.as_mut().unwrap().error = None;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn shortcut_badges_have_distinct_backgrounds_and_wrap_without_splitting() {
         for mode in [
             ShortcutMode::Playback,
             ShortcutMode::PlayerControls,
             ShortcutMode::Add,
+            ShortcutMode::Edit,
             ShortcutMode::Resolving,
             ShortcutMode::Export,
             ShortcutMode::Import,
@@ -1357,7 +1637,9 @@ mod tests {
                         .any(|span| span.content == " Enter "),
                     matches!(
                         mode,
-                        ShortcutMode::Add
+                        ShortcutMode::Playback
+                            | ShortcutMode::Add
+                            | ShortcutMode::Edit
                             | ShortcutMode::Export
                             | ShortcutMode::Import
                             | ShortcutMode::Settings
