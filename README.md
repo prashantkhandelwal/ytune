@@ -1,26 +1,98 @@
 # ytune
 
-A keyboard-driven YouTube audio player built with Rust and Ratatui. The narrow left
-pane groups saved video URLs by playlist/category; the right pane displays the
-current title, available artist/album metadata, source URL, seek bar, volume,
-and repeat mode. Status and errors appear in the top-right header. Keyboard
-shortcuts stay at the bottom as badges with cyan keys and dark-gray actions,
-wrapping to fit the terminal without splitting key/action pairs.
-The **Up/Down**, **Space**, **n/b**, **Left/Right**, **+/-**, **r**, **m**, and **s** controls
-are shown in two columns and four rows, with a blank line between rows, in a centered dialog:
-press **k** to open it, and **k** or **Esc** to close it.
-These playback controls remain usable while the dialog is
-open, including track selection and volume changes; other library/settings
-controls require closing it first. **q** still quits.
-The playing track is bold green (yellow while paused), even when another
-track is selected.
-Playback progress uses a thin seek track with a rectangular playhead. Elapsed and
-total time are displayed below the track, so the playhead never covers them.
-Use Left/Right to seek by the configured interval.
+A keyboard-driven YouTube audio player for your terminal, built with Rust and
+Ratatui. Organize video URLs into categories, stream audio through mpv, and
+discover more recordings by an artist without leaving the app.
+
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Usage and keyboard shortcuts](#usage)
+- [Related songs](#related-songs)
+- [Playback behavior](#playback-behavior)
+- [Export](#export)
+- [Import](#import)
+- [Settings](#settings)
+- [Saved library](#saved-library)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [License](#license)
+
+## Features
+
+### Audio playback
+
+- Audio-only YouTube streaming through mpv and yt-dlp; no video window.
+- Play, pause, resume, stop, and seek backward or forward.
+- Next/previous navigation across all categories, including collapsed ones.
+- Repeat Off, Track, and All modes, with automatic progression at end of track.
+- Volume adjustment from 0 to 100% and mute/unmute without losing the volume level.
+- Configurable seek interval and volume step.
+- Live playback state, elapsed/total time, seek bar, source URL, artist, album,
+  category, volume, and repeat indicator.
+- Responsive track switching: rapid manual selections defer network work until
+  the final selection; stopping cancels a pending selection.
+
+### Library management
+
+- Add individual YouTube video, Shorts, live-video, and `youtu.be` URLs.
+- Group tracks into named categories and expand/collapse category lists.
+- Resolve and save source title, artist, album, uploader, duration, thumbnail URL,
+  and upload date when available. Thumbnail URLs are stored, not displayed as images.
+- Set an optional display-title override when adding a track.
+- Edit a saved track's name, category, artist, and album without a network lookup
+  or interrupting playback.
+- Move tracks between categories by editing their category.
+- Prevent duplicate URLs within a category while allowing the same URL in
+  different categories.
+- Delete tracks with explicit confirmation.
+- Save changes immediately and atomically, retaining the previous library if a
+  save fails.
+- Export the complete library, including metadata, to JSON without overwriting
+  existing files.
+- Import and merge JSON libraries with validation, duplicate skipping, and an
+  added/skipped summary; older libraries without metadata remain supported.
+
+### Artist discovery
+
+- Browse related MusicBrainz recordings for the current or selected track's artist.
+- Choose among multiple credited artists and disambiguate same-name MusicBrainz
+  artists before browsing recordings.
+- Paginate distinct song titles with a configurable 1-100 songs per artist per
+  page; exclude the current title when it matches.
+- Switch artists, reuse session-cached results, and refresh or retry lookups.
+- Search YouTube for a selected related recording and browse up to five videos.
+- Add a result to a chosen category, or save it to the source category and play it.
+- Keep playback and navigation responsive during cancellable background lookups,
+  with rate-limited MusicBrainz requests and retries for temporary service failures.
+
+### Terminal interface and settings
+
+- Two-pane library/audio-details layout with scrolling lists and category counts.
+- Distinct selection and playback indicators: the active track is bold green,
+  or yellow when paused, even when a different row is selected.
+- Context-sensitive keyboard badges and an in-app player shortcut dialog (**k**).
+- Centered add, edit, delete, import, export, and Settings dialogs, with paste
+  support in text fields and explicit error messages.
+- Scrollable Settings fields and a focused discovery view on smaller terminals.
+- Configure mpv and yt-dlp paths in Settings, via environment overrides, or PATH.
+- Relocate the data folder from Settings while retaining the original files.
+- Manage the saved library offline; adding tracks and streaming require YouTube
+  access, and discovery additionally uses MusicBrainz.
+- Windows named-pipe and Linux/macOS Unix-socket playback control; ytune stops
+  only the mpv child it started when exiting.
+
+**Scope:** ytune streams individual videos. It does not import YouTube playlists,
+download audio for offline playback, show video, or provide account/cookie setup.
+Categories are local library groups, not synchronized YouTube playlists.
 
 ## Requirements
 
-- Current stable Rust (edition 2024; tested with Rust 1.93)
+- Current stable Rust and Cargo (the project uses Rust edition 2024), plus the
+  platform build tools below, to build and install ytune
+- Git to clone the repository
 - [mpv](https://mpv.io/installation/) with its standard yt-dlp hook
 - A current [yt-dlp](https://github.com/yt-dlp/yt-dlp#installation) executable
 - A [yt-dlp-supported JavaScript runtime](https://github.com/yt-dlp/yt-dlp/wiki/EJS)
@@ -28,31 +100,178 @@ Use Left/Right to seek by the configured interval.
 - Internet access and an audio output device
 - A terminal at least 64 columns by 20 rows
 
-Install mpv and yt-dlp using your preferred package manager, for example on
-Windows, for yt-dlp:
+Rust, Cargo, Git, and the compiler/linker are needed for installation from source,
+not for running an already-built executable. mpv, yt-dlp, and the JavaScript
+runtime must remain installed for playback.
+
+## Installation
+
+The steps below install ytune from this repository. Run the commands in a terminal;
+no YouTube API key or MusicBrainz account is required.
+
+### 1. Install the dependencies
+
+#### Windows (PowerShell)
+
+1. Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+   with the **Desktop development with C++** workload, including the MSVC tools
+   and Windows SDK. Rust's default Windows toolchain needs these to link the app.
+2. Install Git, Rustup, yt-dlp, and Deno:
 
 ```powershell
+winget install --id Git.Git -e
+winget install --id Rustlang.Rustup -e
 winget install --id yt-dlp.yt-dlp -e
+winget install --id DenoLand.Deno -e
 ```
 
-Use a package that exposes **mpv itself**, not just a GUI launcher, on PATH.
-Alternatively install mpv from its installation page and set `YTUNE_MPV`.
-Both `mpv --version` and `yt-dlp --version` should work in your shell.
-Paths containing spaces are supported:
+3. Install a Windows mpv build linked from the
+   [mpv installation page](https://mpv.io/installation/). Extract the complete
+   package to a permanent folder, such as `C:\tools\mpv`, and add that folder to
+   your user PATH. The package must contain **mpv.exe itself**, not just a GUI
+   launcher, and include its standard yt-dlp hook.
+4. Close and reopen PowerShell so PATH changes take effect, then select stable Rust:
+
+```powershell
+rustup default stable
+rustup update stable
+```
+
+If you prefer not to add mpv to PATH, set its full path before launching ytune:
 
 ```powershell
 $env:YTUNE_MPV = 'C:\tools\mpv\mpv.exe'
-$env:YTUNE_YTDLP = 'C:\tools\yt-dlp.exe'
-cargo run --release
 ```
 
-On Linux/macOS, install mpv and yt-dlp with your package manager, then run
-`cargo run --release`. Playback uses a local named pipe on Windows and a Unix
-socket on Unix. Only the mpv child started by ytune is stopped on exit.
+This environment override applies to the current PowerShell session. You can
+save a permanent executable path in ytune's Settings after installation.
+Paths containing spaces are supported; do not include literal quote characters
+in paths entered into Settings.
+
+#### macOS (Terminal)
+
+Install Apple's command-line build tools:
+
+```sh
+xcode-select --install
+```
+
+Install [Homebrew](https://brew.sh/) if needed, then install playback dependencies:
+
+```sh
+brew install mpv yt-dlp deno
+```
+
+Install Rust using [Rustup](https://rustup.rs/). Follow its prompts, reopen the
+terminal, then run:
+
+```sh
+rustup default stable
+rustup update stable
+```
+
+The Apple command-line tools also provide Git.
+
+#### Linux (Ubuntu/Debian example)
+
+Install Git, build tools, and mpv:
+
+```sh
+sudo apt update
+sudo apt install git build-essential curl ca-certificates mpv
+```
+
+Install current stable Rust using [Rustup](https://rustup.rs/), and install
+yt-dlp and Deno using their official instructions:
+
+- [yt-dlp installation](https://github.com/yt-dlp/yt-dlp#installation)
+- [Deno installation](https://docs.deno.com/runtime/getting_started/installation/)
+
+Reopen the terminal after installation, then run:
+
+```sh
+rustup default stable
+rustup update stable
+```
+
+On other distributions, use the equivalent compiler/linker, Git, and mpv
+packages. Distribution versions of yt-dlp can lag behind YouTube changes; use a
+current upstream release if extraction fails.
+
+### 2. Verify the tools
+
+In the terminal you will use to install and run ytune:
+
+```text
+git --version
+rustc --version
+cargo --version
+mpv --version
+yt-dlp --version
+deno --version
+```
+
+Every command should print a version. If using `YTUNE_MPV` instead of PATH on
+Windows, replace the mpv check with `& $env:YTUNE_MPV --version`. Deno is the
+recommended JavaScript runtime here; another runtime must be configured according
+to [yt-dlp's EJS documentation](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
+
+### 3. Install ytune
+
+Run these commands on any of the platforms above:
+
+```text
+git clone https://github.com/prashantkhandelwal/ytune.git
+cd ytune
+cargo install --path . --locked
+ytune
+```
+
+Cargo builds an optimized executable and installs it in its binary directory.
+If `ytune` is not found, reopen the terminal and ensure Cargo's binary directory
+is on PATH: `%USERPROFILE%\.cargo\bin` on Windows or `$HOME/.cargo/bin` on
+Linux/macOS by default (a custom `CARGO_HOME` changes this location).
+
+Alternatively, build and run without installing:
+
+```text
+cargo run --release --locked
+```
+
+Run that alternative from the cloned repository. After a release build, the
+standalone app is `target\release\ytune.exe` on Windows or `target/release/ytune`
+on Linux/macOS. Run it in an interactive terminal, not by double-clicking it.
+
+### 4. Play your first track
+
+1. Launch `ytune` in a terminal at least **64 columns by 20 rows**.
+2. Wait for the playback engine to become ready. If the header says **Not Ready**,
+   press **t**, set the mpv/yt-dlp executable paths, and press **Enter** to save
+   and retry startup. See [Troubleshooting](#troubleshooting) if it remains unavailable.
+3. Press **a**. The URL field is focused; paste an individual YouTube video URL.
+4. Use **Tab / Shift+Tab** to choose a category (default `Favorites`) and optionally
+   enter a display title. Press **Enter** and wait for metadata lookup to complete.
+5. Select the saved track with **Up / Down**, then press **Space** to stream audio.
+6. Press **k** for playback shortcuts, **t** for Settings, or **q** to quit from
+   the main view. Changes to the library are saved automatically.
+
+### Updating
+
+With a clean checkout, run the following from the cloned repository:
+
+```text
+git pull --ff-only
+cargo install --path . --locked --force
+```
+
+If running without installing, rebuild with `cargo build --release --locked`
+instead. Keep yt-dlp, mpv, and your JavaScript runtime up to date using the method
+used to install them. Updating the executable does not replace the library or
+settings stored in the configured data folder.
 
 ## Usage
 
-1. Run `cargo run --release`.
+1. Run `ytune` (or `cargo run --release --locked` from the repository).
 2. Press **a**, paste a YouTube video URL, and use **Tab** to edit its category
    and optional display-title override. Press **Enter** to resolve the video's
    title and metadata and save it. The UI stays responsive during lookup;
@@ -92,7 +311,7 @@ entire library. Collapse state lasts for the current session.
 | n / b | Play next / previous track (wrap around) |
 | r | Cycle repeat: Off, Track, All |
 | Left / Right | Seek backward / forward by the configured interval (default 10 seconds) |
-| + / - | Adjust volume by the configured step (default 5%; volume stays within 0–100%) |
+| + (or =) / - | Adjust volume by the configured step (default 5%; volume stays within 0–100%) |
 | a | Add a URL to a new or existing category |
 | m | Toggle mute / unmute without changing the volume level |
 | e | Export the entire library as JSON |
@@ -103,6 +322,12 @@ entire library. Collapse state lasts for the current session.
 | s | Stop audio and reset playback position |
 | Delete | Ask to remove the selected track; y confirms, n / Esc cancels |
 | q | Quit (main view) |
+
+Press **k** to open the player shortcuts dialog, and **k** or **Esc** to close it.
+Track selection, play/pause, next/previous, seeking, volume, repeat, mute, stop,
+and quit remain available while it is open; close it before using library or
+Settings commands. The footer changes to show shortcuts for the active dialog
+or discovery view.
 
 In the add dialog, **Tab / Shift+Tab** changes fields, **Ctrl+U** clears a
 field, **Backspace** deletes the last character, **Enter** resolves metadata
@@ -201,15 +426,7 @@ Only **y** deletes it; **n** or **Esc** keeps it. Playback is stopped only if
 the confirmed song is currently playing and the playlist was saved successfully.
 Save failures stay visible in the dialog so you can retry or cancel.
 
-## Export
-
-Press **e** to export every category and track, including saved metadata, to a
-JSON file. The default destination is `ytune-playlists.json` in the configured
-data folder. Edit the destination path or use **Ctrl+U** to clear it, then press
-**Enter** to export. **Esc** cancels. Parent directories are created if needed.
-Existing files are never overwritten; choose a different path if one exists.
-Exports use the same JSON structure as the saved library. Exporting does not
-modify the library or require a network connection.
+## Playback behavior
 
 Automatic playback stops at the end with repeat Off, replays the current track
 with repeat Track, and wraps the whole library with repeat All. Playback errors
@@ -220,6 +437,16 @@ as playback failures. If playback actually fails, the error includes mpv's most
 recent diagnostic.
 Press **s** to stop playback without closing the engine or changing mute or
 volume. **Space** starts the selected track again from the beginning.
+
+## Export
+
+Press **e** to export every category and track, including saved metadata, to a
+JSON file. The default destination is `ytune-playlists.json` in the configured
+data folder. Edit the destination path or use **Ctrl+U** to clear it, then press
+**Enter** to export. **Esc** cancels. Parent directories are created if needed.
+Existing files are never overwritten; choose a different path if one exists.
+Exports use the same JSON structure as the saved library. Exporting does not
+modify the library or require a network connection.
 
 ## Import
 
@@ -349,7 +576,33 @@ Example:
 Malformed or unreadable libraries cause an explicit startup error and are not
 overwritten. Failed saves leave the in-memory library unchanged.
 
-## Troubleshooting and development
+## Troubleshooting
+
+| Problem | What to check |
+| --- | --- |
+| `cargo` or `rustc` is not found | Reopen the terminal after installing Rustup and check Cargo's binary directory is on PATH. |
+| Build fails with a missing linker or Windows SDK | Install the Windows C++ workload and SDK, macOS command-line tools, or Linux compiler/linker packages listed above. Use current stable Rust. |
+| `ytune` is not found after installation | Check Cargo's binary directory is on PATH, or run `cargo run --release --locked` from the repository. |
+| Header stays **Not Ready** | Verify both playback executables, set their paths with **t**, and save Settings to retry startup. A GUI mpv launcher is not a substitute for mpv itself. |
+| YouTube extraction fails or no audio format is available | Update yt-dlp, check your JavaScript runtime, network connection, and whether the video is publicly accessible. |
+| Audio is silent | Check system output/mixer settings, raise ytune's volume, and press **m** if muted. |
+| Only a resize message appears | Increase the terminal to at least 64 columns by 20 rows. |
+| Related recordings are wrong or unavailable | Use **d** to choose the intended artist, **c** to switch credited artists, or **f** to refresh/retry. Artist metadata may need editing with **Enter** in the library. |
+| Startup reports invalid JSON or missing relocated data | Back up and repair the reported files, or restore the relocated library and settings; ytune does not silently discard them. |
+
+Executable resolution is: **saved Settings path**, then **environment override**
+(`YTUNE_MPV` / `YTUNE_YTDLP`), then **PATH**. A stale saved path overrides a
+working PATH entry; clear the field in Settings to return to automatic discovery.
+For example, to override both executables for one PowerShell session:
+
+```powershell
+$env:YTUNE_MPV = 'C:\tools\mpv\mpv.exe'
+$env:YTUNE_YTDLP = 'C:\tools\yt-dlp.exe'
+ytune
+```
+
+For Linux/macOS, use `export YTUNE_MPV='/absolute/path/to/mpv'` and
+`export YTUNE_YTDLP='/absolute/path/to/yt-dlp'` before launching ytune.
 
 If yt-dlp cannot be found at its saved path, on PATH, or at `YTUNE_YTDLP`, a centered error dialog
 shows setup instructions. The top-right header displays **Not Ready** in
@@ -366,6 +619,10 @@ private, unavailable, or sign-in-required videos may not play. No credentials
 or cookies are configured by ytune. mpv user configuration is disabled for
 predictable audio-only behavior. Use only content you are authorized to access
 and respect YouTube's terms.
+
+## Development
+
+From the repository, run:
 
 ```powershell
 cargo test
@@ -397,3 +654,7 @@ exporting it, and cancelling a subsequent lookup:
 $env:YTUNE_SMOKE_URL = 'https://www.youtube.com/watch?v=jNQXAC9IVRw'
 cargo test real_add_resolves_and_persists_metadata -- --ignored --nocapture
 ```
+
+## License
+
+See [LICENSE](LICENSE) for the GNU General Public License, version 3.
