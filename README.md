@@ -22,67 +22,41 @@ discover more recordings by an artist without leaving the app.
 
 ## Features
 
-### Audio playback
-
-- Audio-only YouTube streaming through mpv and yt-dlp; no video window.
-- Play, pause, resume, stop, and seek backward or forward.
-- Next/previous navigation across all categories, including collapsed ones.
-- Repeat Off, Track, and All modes, with automatic progression at end of track.
-- Volume adjustment from 0 to 100% and mute/unmute without losing the volume level.
-- Configurable seek interval and volume step.
-- Live playback state, elapsed/total time, seek bar, source URL, artist, album,
-  category, volume, and repeat indicator.
-- Responsive track switching: rapid manual selections defer network work until
-  the final selection; stopping cancels a pending selection.
-
-### Library management
-
-- Add individual YouTube video, Shorts, live-video, and `youtu.be` URLs.
-- Group tracks into named categories and expand/collapse category lists.
-- Resolve and save source title, artist, album, uploader, duration, thumbnail URL,
-  and upload date when available. Thumbnail URLs are stored, not displayed as images.
-- Set an optional display-title override when adding a track.
-- Edit a saved track's name, category, artist, and album without a network lookup
-  or interrupting playback.
-- Move tracks between categories by editing their category.
-- Prevent duplicate URLs within a category while allowing the same URL in
-  different categories.
-- Delete tracks with explicit confirmation.
-- Save changes immediately and atomically, retaining the previous library if a
-  save fails.
-- Export the complete library, including metadata, to JSON without overwriting
-  existing files.
-- Import and merge JSON libraries with validation, duplicate skipping, and an
-  added/skipped summary; older libraries without metadata remain supported.
-
-### Artist discovery
-
-- Browse related MusicBrainz recordings for the current or selected track's artist.
-- Choose among multiple credited artists and disambiguate same-name MusicBrainz
-  artists before browsing recordings.
-- Paginate distinct song titles with a configurable 1-100 songs per artist per
-  page; exclude the current title when it matches.
-- Switch artists, reuse session-cached results, and refresh or retry lookups.
-- Search YouTube for a selected related recording and browse up to five videos.
-- Add a result to a chosen category, or save it to the source category and play it.
-- Keep playback and navigation responsive during cancellable background lookups,
-  with rate-limited MusicBrainz requests and retries for temporary service failures.
-
-### Terminal interface and settings
-
-- Two-pane library/audio-details layout with scrolling lists and category counts.
-- Distinct selection and playback indicators: the active track is bold green,
-  or yellow when paused, even when a different row is selected.
-- Context-sensitive keyboard badges and an in-app player shortcut dialog (**k**).
-- Centered add, edit, delete, import, export, and Settings dialogs, with paste
-  support in text fields and explicit error messages.
-- Scrollable Settings fields and a focused discovery view on smaller terminals.
-- Configure mpv and yt-dlp paths in Settings, via environment overrides, or PATH.
-- Relocate the data folder from Settings while retaining the original files.
-- Manage the saved library offline; adding tracks and streaming require YouTube
-  access, and discovery additionally uses MusicBrainz.
-- Windows named-pipe and Linux/macOS Unix-socket playback control; ytune stops
-  only the mpv child it started when exiting.
+- **Audio-only streaming:** Play individual YouTube videos, Shorts, live videos,
+  and `youtu.be` links through mpv and yt-dlp without a video window.
+- **Playback controls:** Play, pause, resume, stop, seek, adjust volume, and mute
+  without losing the volume level.
+- **Queue and repeat:** Navigate across all categories, including collapsed ones,
+  with automatic track progression and Off, Track, and All repeat modes.
+- **Live audio details:** View playback state, elapsed/total time, a seek bar,
+  source URL, artist, album, category, volume, and repeat status.
+- **Organized library:** Group tracks into expandable categories, prevent duplicate
+  URLs within a category, and confirm track deletions.
+- **Saved metadata:** Fetch and retain source titles, artists, albums, uploaders,
+  durations, thumbnail URLs, and upload dates when available.
+- **Track editing:** Customize display titles and edit names, categories, artists,
+  and albums without a network lookup or interrupting playback.
+- **Reliable local storage:** Save library changes immediately and atomically,
+  preserving the previous library if a save fails.
+- **JSON import and export:** Export the complete library with metadata without
+  overwriting existing files; merge imports with validation, duplicate skipping,
+  and an added/skipped summary, including older libraries without metadata.
+- **Artist discovery:** Browse related MusicBrainz recordings, choose credited
+  artists, disambiguate same-name artists, and paginate 1-100 distinct songs per
+  artist per page.
+- **YouTube discovery search:** Browse up to five videos for a related recording,
+  then save a result to a category or save and play it.
+- **Responsive lookups:** Keep navigating during cancellable background searches,
+  reuse session-cached discovery results, and refresh or retry lookups.
+- **Keyboard-driven interface:** Use a two-pane terminal layout, scrolling lists,
+  category counts, distinct playback indicators, context-sensitive shortcuts,
+  and an in-app shortcut dialog.
+- **Configurable settings:** Change seek intervals, volume steps, discovery page
+  sizes, executable paths, and the data folder while retaining original files.
+- **Offline library management:** Organize saved tracks without internet access;
+  adding tracks and streaming require YouTube, while discovery also uses MusicBrainz.
+- **Cross-platform playback:** Control mpv through Windows named pipes or
+  Linux/macOS Unix sockets, stopping only ytune's own mpv child on exit.
 
 **Scope:** ytune streams individual videos. It does not import YouTube playlists,
 download audio for offline playback, show video, or provide account/cookie setup.
