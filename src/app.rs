@@ -15,6 +15,7 @@ use crate::{
     library::{Library, Track},
     metadata::{Resolver, TrackMetadata},
     player::{Player, PlayerEvent},
+    thumbnail::Thumbnail,
 };
 
 const TRACK_SETTLE_DELAY: Duration = Duration::from_millis(400);
@@ -87,6 +88,7 @@ pub struct DeleteConfirmation {
 
 pub struct SettingsForm {
     pub fields: [String; 6],
+    pub show_thumbnail: bool,
     pub focus: usize,
     pub error: Option<String>,
     original_ytdlp: String,
@@ -129,6 +131,7 @@ impl SettingsForm {
                 .trim()
                 .parse()
                 .context("Related song limit must be a whole number between 1 and 100")?,
+            show_thumbnail: self.show_thumbnail,
         };
         settings.validate()?;
         let directory = self.fields[2].trim();
@@ -178,6 +181,7 @@ pub struct App {
     pub selected_header: Option<usize>,
     pub collapsed: HashSet<String>,
     pub playback: Playback,
+    pub thumbnail: Thumbnail,
     pub repeat: Repeat,
     pub volume: f64,
     pub muted: bool,
@@ -223,6 +227,7 @@ impl App {
             selected_header: None,
             collapsed: HashSet::new(),
             playback: Playback::default(),
+            thumbnail: Thumbnail::default(),
             repeat: Repeat::Off,
             volume: 70.0,
             muted: false,
@@ -677,6 +682,7 @@ impl App {
                 self.settings.volume_step.to_string(),
                 self.settings.related_song_limit.to_string(),
             ],
+            show_thumbnail: self.settings.show_thumbnail,
             focus: 0,
             error: None,
             original_ytdlp: executable,
@@ -696,11 +702,21 @@ impl App {
         let Some(form) = &mut self.settings_form else {
             return;
         };
+        let field_count = form.fields.len() + 1;
         match key.code {
-            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1) % form.fields.len(),
+            KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1) % field_count,
             KeyCode::BackTab | KeyCode::Up => {
-                form.focus = (form.focus + form.fields.len() - 1) % form.fields.len()
+                form.focus = (form.focus + field_count - 1) % field_count
             }
+            KeyCode::Char(' ')
+                if form.focus == form.fields.len()
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                form.show_thumbnail = !form.show_thumbnail;
+            }
+            _ if form.focus == form.fields.len() => {}
             KeyCode::Backspace => {
                 form.fields[form.focus].pop();
             }
@@ -801,7 +817,9 @@ impl App {
             return;
         }
         if let Some(form) = &mut self.settings_form {
-            form.fields[form.focus].extend(text.chars().filter(|c| !c.is_control()));
+            if let Some(field) = form.fields.get_mut(form.focus) {
+                field.extend(text.chars().filter(|c| !c.is_control()));
+            }
         } else if let Some(form) = &mut self.form {
             form.fields[form.focus].extend(text.chars().filter(|c| !c.is_control()));
         } else if let Some(form) = &mut self.edit_form {
@@ -1255,6 +1273,14 @@ impl App {
             search.poll();
         }
         if !self.quit {
+            let thumbnail_url = if self.settings.show_thumbnail {
+                self.details_track()
+                    .and_then(|track| track.metadata.as_ref())
+                    .and_then(|metadata| metadata.thumbnail.clone())
+            } else {
+                None
+            };
+            self.thumbnail.update(thumbnail_url.as_deref());
             let artist = self.details_artist().to_owned();
             let title = self
                 .details_track()
@@ -1473,6 +1499,7 @@ pub(crate) mod tests {
             selected_header: None,
             collapsed: HashSet::new(),
             playback: Playback::default(),
+            thumbnail: Thumbnail::default(),
             repeat: Repeat::Off,
             volume: 70.0,
             muted: false,
@@ -2826,6 +2853,7 @@ pub(crate) mod tests {
                 app.settings.related_song_limit.to_string(),
             ]
         );
+        assert_eq!(form.show_thumbnail, app.settings.show_thumbnail);
         assert_eq!(form.values(&app.settings)?.0.mpv_path, None);
         let executable = std::env::current_exe()?;
         form.fields[1] = executable.to_string_lossy().into_owned();
@@ -2841,7 +2869,7 @@ pub(crate) mod tests {
         form.fields[1].clear();
         assert_eq!(form.values(&app.settings)?.0.mpv_path, None);
         key(&mut app, KeyCode::Up);
-        assert_eq!(app.settings_form.as_ref().unwrap().focus, 5);
+        assert_eq!(app.settings_form.as_ref().unwrap().focus, 6);
         key(&mut app, KeyCode::Tab);
         assert_eq!(app.settings_form.as_ref().unwrap().focus, 0);
         Ok(())
@@ -2870,6 +2898,78 @@ pub(crate) mod tests {
             assert_eq!(Storage::load(directory.path())?.1, original);
             key(&mut app, KeyCode::Esc);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn thumbnail_visibility_settings_save_reload_and_cancel_without_interrupting_playback()
+    -> Result<()> {
+        let (mut app, directory, commands, _events) = fixture();
+        app.library
+            .add("Music", "Playing track", "https://youtu.be/current")?;
+        app.playback.track = Some(app.library.get(0).unwrap().1.clone());
+        app.playback.active = true;
+        app.playback.position = 42.0;
+        app.storage
+            .save(directory.path(), &app.settings, &app.library)?;
+
+        key(&mut app, KeyCode::Char('t'));
+        key(&mut app, KeyCode::Up);
+        assert_eq!(app.settings_form.as_ref().unwrap().focus, 6);
+        key(&mut app, KeyCode::Char(' '));
+        assert!(app.settings_form.as_ref().unwrap().show_thumbnail);
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.settings.show_thumbnail);
+        assert!(!Storage::load(directory.path())?.1.show_thumbnail);
+
+        for show in [true, false] {
+            key(&mut app, KeyCode::Char('t'));
+            key(&mut app, KeyCode::Up);
+            assert_eq!(
+                app.settings_form.as_ref().unwrap().show_thumbnail,
+                app.settings.show_thumbnail
+            );
+            key(&mut app, KeyCode::Char(' '));
+            assert_eq!(app.settings_form.as_ref().unwrap().show_thumbnail, show);
+            key(&mut app, KeyCode::Enter);
+            assert!(app.settings_form.is_none());
+            assert_eq!(app.settings.show_thumbnail, show);
+            assert_eq!(Storage::load(directory.path())?.1.show_thumbnail, show);
+            assert!(app.playback.active);
+            assert_eq!(app.playback.position, 42.0);
+            assert!(app.ready);
+            assert_eq!(commands.try_recv(), Err(TryRecvError::Empty));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn thumbnail_checkbox_ignores_text_editing_and_paste() -> Result<()> {
+        let (mut app, directory, _commands, _events) = fixture();
+        app.storage
+            .save(directory.path(), &app.settings, &app.library)?;
+        key(&mut app, KeyCode::Char('t'));
+        let original_fields = app.settings_form.as_ref().unwrap().fields.clone();
+        key(&mut app, KeyCode::Char(' '));
+        assert_eq!(
+            app.settings_form.as_ref().unwrap().fields[0],
+            format!("{} ", original_fields[0])
+        );
+        assert!(!app.settings_form.as_ref().unwrap().show_thumbnail);
+        key(&mut app, KeyCode::Up);
+        for code in [KeyCode::Char('t'), KeyCode::Char('1'), KeyCode::Backspace] {
+            key(&mut app, code);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        app.handle_paste("true");
+        assert!(!app.settings_form.as_ref().unwrap().show_thumbnail);
+        key(&mut app, KeyCode::Char(' '));
+        app.handle_paste("false");
+        assert!(app.settings_form.as_ref().unwrap().show_thumbnail);
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.settings.show_thumbnail);
+        assert!(!Storage::load(directory.path())?.1.show_thumbnail);
         Ok(())
     }
 

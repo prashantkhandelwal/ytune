@@ -30,6 +30,9 @@ discover more recordings by an artist without leaving the app.
   with automatic track progression and Off, Track, and All repeat modes.
 - **Live audio details:** View playback state, elapsed/total time, a seek bar,
   source URL, artist, album, category, volume, and repeat status.
+- **Track thumbnails:** Show the stored YouTube thumbnail at the top-right of
+  Audio Details using native terminal images where supported, with colored blocks
+  as a fallback.
 - **Organized library:** Group tracks into expandable categories, prevent duplicate
   URLs within a category, and confirm track deletions.
 - **Saved metadata:** Fetch and retain source titles, artists, albums, uploaders,
@@ -412,6 +415,29 @@ recent diagnostic.
 Press **s** to stop playback without closing the engine or changing mute or
 volume. **Space** starts the selected track again from the beginning.
 
+Audio Details shows the playing track's stored thumbnail, or the selected track's
+thumbnail when no track is loaded. The image sits at the top-right inside Audio
+Details with one column of right padding and no separate border or label.
+Images load in the background from
+the saved thumbnail URL and a bounded in-memory cache reuses recent images for
+the session.
+This is the YouTube video thumbnail, not a separate album-cover lookup.
+Thumbnail failures are shown in the image area and do not interrupt playback.
+Use **Settings > Show thumbnail** to hide or display the image.
+Tracks without a thumbnail retain the text-only layout. The thumbnail is hidden
+when the details pane is too small, a dialog is open, or related-song browsing is
+focused. When thumbnails are first enabled, ytune queries the terminal for native
+image support and its character-cell pixel size. Supported Sixel, Kitty, and iTerm2 graphics render real
+image pixels, with aspect-preserving high-quality resizing. Windows Terminal
+1.22 and later support Sixel.
+Restart ytune after updating your terminal.
+
+Terminals without native image support use true-color Unicode half-blocks.
+This fallback is inherently low resolution (two image pixels per terminal cell);
+increasing the source image size cannot make it sharp.
+Native-image detection or encoding errors are shown in the image area.
+No external image viewer or encoder is required.
+
 ## Export
 
 Press **e** to export every category and track, including saved metadata, to a
@@ -453,9 +479,9 @@ Press **t** to open a centered Settings overlay above the library and audio
 details. Use **Tab / Shift+Tab** or
 **Up / Down** to select a field, **Ctrl+U** to clear it, **Backspace** to remove
 the last character, **Enter** to save, and **Esc** to return without saving.
-Each setting is shown as a label on the left and a bordered value text box on
-the right. The active text box has a cyan border and a highlighted background.
-Text is appended at the end of the active field.
+Each setting is shown as a label on the left and a bordered value on the right.
+The active control has a cyan border and a highlighted background. Text is
+appended at the end of text fields. **Space** toggles a focused checkbox.
 
 - **yt-dlp executable:** shows the resolved executable path when available.
   Enter a valid executable path, including paths containing spaces. A saved
@@ -481,6 +507,12 @@ Text is appended at the end of the active field.
   restarting playback. Further recording batches are fetched as needed after
   filtering distinct titles and excluding the current song. YouTube
   search still returns up to five videos.
+- **Show thumbnail:** a checkbox, unchecked by default. Focus it and press
+  **Space** to toggle between `[x]` (display) and `[ ]` (hide), then **Enter**
+  to save. **Esc** discards the change. Saving takes effect without restarting playback and
+  persists across launches. Hidden thumbnails are not downloaded, and Audio
+  Details uses the full text width. Existing settings files without this field
+  default to thumbnails hidden. Explicitly saved values are preserved.
 
 Use **Tab / Shift+Tab** or **Up / Down** to navigate fields; on small terminals,
 the Settings fields scroll to keep the focused field visible.
@@ -507,7 +539,8 @@ Example `settings.json`:
   "mpv_path": "C:\\tools\\mpv\\mpv.exe",
   "seek_seconds": 10,
   "volume_step": 5,
-  "related_song_limit": 5
+  "related_song_limit": 5,
+  "show_thumbnail": false
 }
 ```
 

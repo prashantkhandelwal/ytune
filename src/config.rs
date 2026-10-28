@@ -18,6 +18,7 @@ pub struct Settings {
     pub seek_seconds: u32,
     pub volume_step: u8,
     pub related_song_limit: usize,
+    pub show_thumbnail: bool,
 }
 
 impl Default for Settings {
@@ -28,6 +29,7 @@ impl Default for Settings {
             seek_seconds: 10,
             volume_step: 5,
             related_song_limit: 5,
+            show_thumbnail: false,
         }
     }
 }
@@ -237,11 +239,13 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let (storage, settings) = Storage::load(directory.path())?;
         assert_eq!(settings, Settings::default());
+        assert!(!settings.show_thumbnail);
         let settings = Settings {
             mpv_path: Some(directory.path().join("mpv folder").join("mpv.exe")),
             seek_seconds: 25,
             volume_step: 7,
             related_song_limit: 20,
+            show_thumbnail: true,
             ..settings
         };
         storage.save(directory.path(), &settings, &Library::default())?;
@@ -375,6 +379,7 @@ mod tests {
             serde_json::from_str(r#"{"ytdlp_path":null,"seek_seconds":25,"volume_step":7}"#)?;
         assert_eq!(settings.mpv_path, None);
         assert_eq!(settings.related_song_limit, 5);
+        assert!(!settings.show_thumbnail);
         assert_eq!(settings.seek_seconds, 25);
         assert_eq!(
             settings.mpv_executable(),
@@ -399,6 +404,16 @@ mod tests {
                 ..Settings::default()
             };
             assert_eq!(settings.validate().is_ok(), (1..=100).contains(&limit));
+        }
+    }
+
+    #[test]
+    fn thumbnail_visibility_requires_a_json_boolean() {
+        for value in [r#""false""#, "null", "0"] {
+            assert!(
+                serde_json::from_str::<Settings>(&format!(r#"{{"show_thumbnail":{value}}}"#))
+                    .is_err()
+            );
         }
     }
 }

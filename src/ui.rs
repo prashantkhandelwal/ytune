@@ -474,9 +474,10 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
     }
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let visible_fields = usize::from(inner.height.saturating_sub(1) / 2).min(form.fields.len());
+    let field_count = form.fields.len() + 1;
+    let visible_fields = usize::from(inner.height.saturating_sub(1) / 2).min(field_count);
     let first_field = (form.focus + 1).saturating_sub(visible_fields);
-    let last_field = (first_field + visible_fields).min(form.fields.len());
+    let last_field = (first_field + visible_fields).min(field_count);
     let sections = Layout::vertical([
         Constraint::Length(visible_fields as u16 * 2 + 1),
         Constraint::Min(0),
@@ -491,6 +492,7 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
         "Seek interval (s)",
         "Volume step (%)",
         "Related song limit",
+        "Show thumbnail",
     ];
     for index in (first_field..last_field)
         .filter(|&index| index != form.focus)
@@ -531,14 +533,21 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
             .border_set(input_border)
             .border_style(Style::default().fg(if focused { ACCENT } else { Color::DarkGray }));
         let input_inner = input_block.inner(input);
-        let value: String = form.fields[index]
-            .chars()
-            .rev()
-            .take(usize::from(input_inner.width.saturating_sub(1)))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+        let value = if index == form.fields.len() {
+            format!(
+                "[{}] Space to toggle",
+                if form.show_thumbnail { "x" } else { " " }
+            )
+        } else {
+            form.fields[index]
+                .chars()
+                .rev()
+                .take(usize::from(input_inner.width.saturating_sub(1)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        };
         frame.render_widget(
             Paragraph::new(format!("{}:", labels[index])).style(
                 Style::default()
@@ -564,7 +573,7 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(
         Paragraph::new(form.error.as_deref().unwrap_or(
-            "Blank executable: auto. Seek > 0; volume and songs per artist 1-100. Folder changes copy data; executable changes stop playback.",
+            "Blank executable: auto. Seek > 0; volume and songs per artist 1-100. Space toggles the checkbox. Folder changes copy data; executable changes stop playback.",
         )).wrap(Wrap { trim: true }).style(Style::default().fg(
             if form.error.is_some() { Color::LightRed } else { Color::Gray },
         )),
@@ -655,6 +664,7 @@ fn shortcut_lines(mode: ShortcutMode, width: u16) -> Vec<Line<'static>> {
         ShortcutMode::Import => &[("Enter", "Import"), ("Esc", "Cancel"), ("Ctrl+U", "Clear")],
         ShortcutMode::Settings => &[
             ("Tab/Shift+Tab", "Field"),
+            ("Space", "Toggle"),
             ("Enter", "Save"),
             ("Esc", "Cancel"),
             ("Ctrl+U", "Clear"),
@@ -900,12 +910,44 @@ fn details(frame: &mut Frame, app: &App, area: Rect) {
         lines.retain(|line| !line.spans.is_empty() && line.width() > 0);
         let content =
             Layout::vertical([Constraint::Min(8), Constraint::Length(7)]).split(sections[0]);
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), content[0]);
+        audio_metadata(frame, app, lines, content[0]);
         related_songs(frame, app, content[1]);
     } else {
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), sections[0]);
+        audio_metadata(frame, app, lines, sections[0]);
     }
     seek_bar(frame, sections[1], playing.position, duration);
+}
+
+fn audio_metadata(frame: &mut Frame, app: &App, lines: Vec<Line<'_>>, area: Rect) {
+    let dialog_open = app.form.is_some()
+        || app.edit_form.is_some()
+        || app.settings_form.is_some()
+        || app.export_form.is_some()
+        || app.import_form.is_some()
+        || app.youtube_search.is_some()
+        || app.delete_confirmation.is_some()
+        || app.missing_ytdlp.is_some()
+        || app.player_shortcuts_open;
+    let thumbnail_url = app
+        .details_track()
+        .and_then(|track| track.metadata.as_ref())
+        .and_then(|metadata| metadata.thumbnail.as_deref())
+        .filter(|url| !url.trim().is_empty() && !dialog_open && app.settings.show_thumbnail);
+    let text_area =
+        if let Some(url) = thumbnail_url.filter(|_| area.width >= 40 && area.height >= 6) {
+            let columns = Layout::horizontal([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length((area.width / 3).clamp(14, 26)),
+                Constraint::Length(1),
+            ])
+            .split(area);
+            app.thumbnail.render(frame, url, columns[2]);
+            columns[0]
+        } else {
+            area
+        };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), text_area);
 }
 
 fn related_songs(frame: &mut Frame, app: &App, area: Rect) {
@@ -1089,6 +1131,183 @@ fn time(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_thumbnail_renders_beside_details_without_hiding_related_songs_or_seek_bar()
+    -> anyhow::Result<()> {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        app.settings.show_thumbnail = true;
+        let metadata = crate::metadata::tests::sample();
+        app.thumbnail = crate::thumbnail::tests::loaded(metadata.thumbnail.as_deref().unwrap());
+        app.library
+            .add_resolved("Music", "", "https://youtu.be/current", metadata)?;
+        app.related.artist = "Artist".into();
+        app.related.songs = vec!["Related recording".into()];
+        for (width, height) in [(110, 30), (64, 20)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+            terminal.draw(|frame| draw(frame, &app))?;
+            let content = format!("{}", terminal.backend());
+            for expected in [
+                "Audio details",
+                "State:",
+                "Artist:",
+                "0:00 / 2:00",
+                "\u{2580}",
+            ] {
+                assert!(
+                    content.contains(expected),
+                    "Missing {expected} at {width}x{height}"
+                );
+            }
+            assert!(!content.contains("Thumbnail"));
+            assert!(!content.contains("Blocks"));
+            assert_eq!(
+                terminal.backend().buffer()[(width - 3, 4)].symbol(),
+                "\u{2580}",
+                "Image must leave one column of right padding at {width}x{height}"
+            );
+            assert_eq!(terminal.backend().buffer()[(width - 2, 4)].symbol(), " ");
+            if height == 30 {
+                assert!(content.contains("Related recording"));
+                assert!(content.contains("Source"));
+            }
+            app.related_focus = true;
+            terminal.draw(|frame| draw(frame, &app))?;
+            let content = format!("{}", terminal.backend());
+            assert!(content.contains("Related recording"));
+            assert!(!content.contains('\u{2580}'));
+            app.related_focus = false;
+        }
+        app.library.playlists[0].tracks[0]
+            .metadata
+            .as_mut()
+            .unwrap()
+            .thumbnail = None;
+        let mut terminal = Terminal::new(TestBackend::new(110, 30))?;
+        terminal.draw(|frame| draw(frame, &app))?;
+        assert!(!format!("{}", terminal.backend()).contains('\u{2580}'));
+        Ok(())
+    }
+
+    #[test]
+    fn thumbnail_follows_the_track_in_audio_details() -> anyhow::Result<()> {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        app.settings.show_thumbnail = true;
+        let mut metadata = crate::metadata::tests::sample();
+        metadata.artist = None;
+        metadata.uploader = None;
+        let url = metadata.thumbnail.clone().unwrap();
+        app.library
+            .add_resolved("Music", "", "https://youtu.be/current", metadata)?;
+        app.thumbnail = crate::thumbnail::tests::loaded(&url);
+        app.poll_player();
+        app.playback.track = Some(app.library.get(0).unwrap().1.clone());
+        app.library
+            .add("Music", "Another track", "https://youtu.be/other")?;
+        app.selected = 1;
+        app.poll_player();
+        let mut terminal = Terminal::new(TestBackend::new(110, 30))?;
+        terminal.draw(|frame| draw(frame, &app))?;
+        assert!(format!("{}", terminal.backend()).contains('\u{2580}'));
+        app.playback = crate::app::Playback::default();
+        app.poll_player();
+        terminal.draw(|frame| draw(frame, &app))?;
+        let content = format!("{}", terminal.backend());
+        assert!(content.contains("Another track"));
+        assert!(!content.contains("Thumbnail"));
+        assert!(!content.contains('\u{2580}'));
+        Ok(())
+    }
+
+    #[test]
+    fn native_thumbnail_is_hidden_behind_dialogs_and_restored_after_closing() -> anyhow::Result<()>
+    {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        app.settings.show_thumbnail = true;
+        let metadata = crate::metadata::tests::sample();
+        app.thumbnail =
+            crate::thumbnail::tests::sixel_loaded(metadata.thumbnail.as_deref().unwrap());
+        app.library
+            .add_resolved("Music", "", "https://youtu.be/current", metadata)?;
+        let mut terminal = Terminal::new(TestBackend::new(110, 30))?;
+        terminal.draw(|frame| draw(frame, &app))?;
+        let area = app.thumbnail.take_rendered_area().unwrap();
+        assert_eq!(
+            area.y, 4,
+            "Image must start directly below the Audio Details border"
+        );
+        assert_eq!(
+            area.right(),
+            108,
+            "Image must leave one column of right padding"
+        );
+        assert_eq!(terminal.backend().buffer()[(108, area.y)].symbol(), " ");
+
+        app.player_shortcuts_open = true;
+        terminal.draw(|frame| draw(frame, &app))?;
+        assert!(app.thumbnail.rendered_area().is_none());
+        assert!(
+            !terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol().starts_with("\u{1b}P"))
+        );
+        assert!(format!("{}", terminal.backend()).contains("Player shortcuts"));
+
+        app.player_shortcuts_open = false;
+        terminal.draw(|frame| draw(frame, &app))?;
+        assert!(app.thumbnail.rendered_area().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn thumbnail_visibility_setting_hides_native_and_block_images_and_restores_full_text_width()
+    -> anyhow::Result<()> {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        for native in [false, true] {
+            let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+            let metadata = crate::metadata::tests::sample();
+            let url = metadata.thumbnail.as_deref().unwrap();
+            app.thumbnail = if native {
+                crate::thumbnail::tests::sixel_loaded(url)
+            } else {
+                crate::thumbnail::tests::loaded(url)
+            };
+            app.library
+                .add_resolved("Music", "", "https://youtu.be/current", metadata)?;
+            for (width, height) in [(110, 30), (64, 20)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+                for show in [true, false, true] {
+                    app.settings.show_thumbnail = show;
+                    app.thumbnail.take_rendered_area();
+                    terminal.draw(|frame| draw(frame, &app))?;
+                    let has_image = terminal.backend().buffer().content.iter().any(|cell| {
+                        cell.symbol() == "\u{2580}" || cell.symbol().starts_with("\u{1b}P")
+                    });
+                    assert_eq!(has_image, show, "Visibility mismatch at {width}x{height}");
+                    assert_eq!(app.thumbnail.rendered_area().is_some(), native && show);
+                }
+            }
+            app.settings.show_thumbnail = false;
+            let mut terminal = Terminal::new(TestBackend::new(60, 10))?;
+            terminal.draw(|frame| {
+                audio_metadata(frame, &app, vec![Line::raw("X".repeat(60))], frame.area())
+            })?;
+            for x in 0..60 {
+                assert_eq!(terminal.backend().buffer()[(x, 0)].symbol(), "X");
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn discovery_shortcuts_use_f_for_retry_and_preserve_r_for_repeat() {
@@ -1900,6 +2119,7 @@ mod tests {
             "7".into(),
             "20".into(),
         ];
+        app.settings_form.as_mut().unwrap().show_thumbnail = true;
         for (width, height) in [(110, 30), (64, 20)] {
             app.settings_form.as_mut().unwrap().focus = 0;
             let mut terminal = Terminal::new(TestBackend::new(width, height))?;
@@ -1936,16 +2156,27 @@ mod tests {
             assert_eq!(buffer[(value_x, first_row)].bg, Color::Black);
             assert_eq!(buffer[(value_x, first_row + 2)].bg, Color::DarkGray);
             assert_eq!(buffer[(border_x, first_row + 1)].fg, ACCENT);
-            app.settings_form.as_mut().unwrap().focus = 5;
+            app.settings_form.as_mut().unwrap().focus = 6;
             terminal.draw(|frame| draw(frame, &app))?;
             let buffer = terminal.backend().buffer();
-            let visible_fields = usize::from(body_height.min(18).saturating_sub(3) / 2).min(6);
+            let visible_fields = usize::from(body_height.min(18).saturating_sub(3) / 2).min(7);
             let last_row = first_row + (visible_fields as u16 - 1) * 2;
             assert_eq!(buffer[(value_x, last_row)].bg, Color::DarkGray);
-            assert_eq!(buffer[(value_x, last_row)].symbol(), "2");
-            assert!(format!("{}", terminal.backend()).contains("Related song limit"));
+            assert_eq!(buffer[(value_x, last_row)].symbol(), "[");
+            assert_eq!(buffer[(value_x + 1, last_row)].symbol(), "x");
+            assert!(format!("{}", terminal.backend()).contains("Show thumbnail"));
             assert_eq!(buffer[(border_x, last_row + 1)].symbol(), "\u{2514}");
             assert_eq!(buffer[(border_x, last_row + 1)].fg, ACCENT);
+            app.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(' '),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            terminal.draw(|frame| draw(frame, &app))?;
+            assert_eq!(
+                terminal.backend().buffer()[(value_x + 1, last_row)].symbol(),
+                " "
+            );
+            app.settings_form.as_mut().unwrap().show_thumbnail = true;
         }
         Ok(())
     }
