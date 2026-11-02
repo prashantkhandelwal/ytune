@@ -10,6 +10,35 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::library::Library;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibrarySongFormat {
+    #[default]
+    TitleOnly,
+    #[serde(rename = "title_album")]
+    Album,
+    #[serde(rename = "title_artist")]
+    Artist,
+}
+
+impl LibrarySongFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TitleOnly => "Title only",
+            Self::Album => "Title | Album",
+            Self::Artist => "Title | Artist",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::TitleOnly => Self::Album,
+            Self::Album => Self::Artist,
+            Self::Artist => Self::TitleOnly,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Settings {
@@ -19,6 +48,7 @@ pub struct Settings {
     pub volume_step: u8,
     pub related_song_limit: usize,
     pub show_thumbnail: bool,
+    pub library_song_format: LibrarySongFormat,
 }
 
 impl Default for Settings {
@@ -30,6 +60,7 @@ impl Default for Settings {
             volume_step: 5,
             related_song_limit: 5,
             show_thumbnail: false,
+            library_song_format: LibrarySongFormat::default(),
         }
     }
 }
@@ -240,18 +271,46 @@ mod tests {
         let (storage, settings) = Storage::load(directory.path())?;
         assert_eq!(settings, Settings::default());
         assert!(!settings.show_thumbnail);
+        assert_eq!(settings.library_song_format, LibrarySongFormat::TitleOnly);
         let settings = Settings {
             mpv_path: Some(directory.path().join("mpv folder").join("mpv.exe")),
             seek_seconds: 25,
             volume_step: 7,
             related_song_limit: 20,
             show_thumbnail: true,
+            library_song_format: LibrarySongFormat::Artist,
             ..settings
         };
         storage.save(directory.path(), &settings, &Library::default())?;
         let (loaded, restored) = Storage::load(directory.path())?;
         assert_eq!(restored, settings);
         assert_eq!(loaded.library_path(), storage.library_path());
+        Ok(())
+    }
+
+    #[test]
+    fn library_song_formats_are_backward_compatible_and_validate_saved_choices() -> Result<()> {
+        let legacy: Settings = serde_json::from_str(r#"{"show_thumbnail":true}"#)?;
+        assert_eq!(legacy.library_song_format, LibrarySongFormat::TitleOnly);
+        for (value, format) in [
+            ("title_only", LibrarySongFormat::TitleOnly),
+            ("title_album", LibrarySongFormat::Album),
+            ("title_artist", LibrarySongFormat::Artist),
+        ] {
+            let settings: Settings =
+                serde_json::from_str(&format!(r#"{{"library_song_format":"{value}"}}"#))?;
+            assert_eq!(settings.library_song_format, format);
+            assert_eq!(
+                serde_json::to_value(settings)?["library_song_format"],
+                value
+            );
+        }
+        for value in [r#""unknown""#, "true", "null", "1"] {
+            assert!(
+                serde_json::from_str::<Settings>(&format!(r#"{{"library_song_format":{value}}}"#))
+                    .is_err()
+            );
+        }
         Ok(())
     }
 

@@ -10,7 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Value, json};
 
 use crate::{
-    config::{Settings, Storage},
+    config::{LibrarySongFormat, Settings, Storage},
     discovery::{RelatedSongs, YoutubeSearch},
     library::{Library, Track},
     metadata::{Resolver, TrackMetadata},
@@ -89,6 +89,7 @@ pub struct DeleteConfirmation {
 pub struct SettingsForm {
     pub fields: [String; 6],
     pub show_thumbnail: bool,
+    pub library_song_format: LibrarySongFormat,
     pub focus: usize,
     pub error: Option<String>,
     original_ytdlp: String,
@@ -132,6 +133,7 @@ impl SettingsForm {
                 .parse()
                 .context("Related song limit must be a whole number between 1 and 100")?,
             show_thumbnail: self.show_thumbnail,
+            library_song_format: self.library_song_format,
         };
         settings.validate()?;
         let directory = self.fields[2].trim();
@@ -683,6 +685,7 @@ impl App {
                 self.settings.related_song_limit.to_string(),
             ],
             show_thumbnail: self.settings.show_thumbnail,
+            library_song_format: self.settings.library_song_format,
             focus: 0,
             error: None,
             original_ytdlp: executable,
@@ -702,21 +705,25 @@ impl App {
         let Some(form) = &mut self.settings_form else {
             return;
         };
-        let field_count = form.fields.len() + 1;
+        let field_count = form.fields.len() + 2;
         match key.code {
             KeyCode::Tab | KeyCode::Down => form.focus = (form.focus + 1) % field_count,
             KeyCode::BackTab | KeyCode::Up => {
                 form.focus = (form.focus + field_count - 1) % field_count
             }
             KeyCode::Char(' ')
-                if form.focus == form.fields.len()
+                if form.focus >= form.fields.len()
                     && !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                form.show_thumbnail = !form.show_thumbnail;
+                if form.focus == form.fields.len() {
+                    form.show_thumbnail = !form.show_thumbnail;
+                } else {
+                    form.library_song_format = form.library_song_format.cycle();
+                }
             }
-            _ if form.focus == form.fields.len() => {}
+            _ if form.focus >= form.fields.len() => {}
             KeyCode::Backspace => {
                 form.fields[form.focus].pop();
             }
@@ -2869,7 +2876,7 @@ pub(crate) mod tests {
         form.fields[1].clear();
         assert_eq!(form.values(&app.settings)?.0.mpv_path, None);
         key(&mut app, KeyCode::Up);
-        assert_eq!(app.settings_form.as_ref().unwrap().focus, 6);
+        assert_eq!(app.settings_form.as_ref().unwrap().focus, 7);
         key(&mut app, KeyCode::Tab);
         assert_eq!(app.settings_form.as_ref().unwrap().focus, 0);
         Ok(())
@@ -2915,6 +2922,7 @@ pub(crate) mod tests {
 
         key(&mut app, KeyCode::Char('t'));
         key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Up);
         assert_eq!(app.settings_form.as_ref().unwrap().focus, 6);
         key(&mut app, KeyCode::Char(' '));
         assert!(app.settings_form.as_ref().unwrap().show_thumbnail);
@@ -2924,6 +2932,7 @@ pub(crate) mod tests {
 
         for show in [true, false] {
             key(&mut app, KeyCode::Char('t'));
+            key(&mut app, KeyCode::Up);
             key(&mut app, KeyCode::Up);
             assert_eq!(
                 app.settings_form.as_ref().unwrap().show_thumbnail,
@@ -2957,6 +2966,7 @@ pub(crate) mod tests {
         );
         assert!(!app.settings_form.as_ref().unwrap().show_thumbnail);
         key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Up);
         for code in [KeyCode::Char('t'), KeyCode::Char('1'), KeyCode::Backspace] {
             key(&mut app, code);
         }
@@ -2970,6 +2980,66 @@ pub(crate) mod tests {
         key(&mut app, KeyCode::Esc);
         assert!(!app.settings.show_thumbnail);
         assert!(!Storage::load(directory.path())?.1.show_thumbnail);
+        Ok(())
+    }
+
+    #[test]
+    fn library_song_format_settings_cycle_save_and_cancel_without_changing_tracks() -> Result<()> {
+        let (mut app, directory, commands, _events) = fixture();
+        app.library
+            .add("Music", "Saved title", "https://youtu.be/current")?;
+        app.playback.track = Some(app.library.get(0).unwrap().1.clone());
+        app.playback.active = true;
+        app.playback.position = 42.0;
+        let track = app.playback.track.clone();
+        app.storage
+            .save(directory.path(), &app.settings, &app.library)?;
+
+        key(&mut app, KeyCode::Char('t'));
+        key(&mut app, KeyCode::Up);
+        assert_eq!(app.settings_form.as_ref().unwrap().focus, 7);
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(
+            app.settings.library_song_format,
+            LibrarySongFormat::TitleOnly
+        );
+        assert_eq!(Storage::load(directory.path())?.1, app.settings);
+
+        for expected in [
+            LibrarySongFormat::Album,
+            LibrarySongFormat::Artist,
+            LibrarySongFormat::TitleOnly,
+        ] {
+            key(&mut app, KeyCode::Char('t'));
+            key(&mut app, KeyCode::Up);
+            let fields = app.settings_form.as_ref().unwrap().fields.clone();
+            for code in [KeyCode::Char('x'), KeyCode::Backspace] {
+                key(&mut app, code);
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+            app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+            app.handle_paste("title_artist");
+            assert_eq!(app.settings_form.as_ref().unwrap().fields, fields);
+            assert_eq!(
+                app.settings_form.as_ref().unwrap().library_song_format,
+                app.settings.library_song_format
+            );
+            key(&mut app, KeyCode::Char(' '));
+            assert_eq!(
+                app.settings_form.as_ref().unwrap().library_song_format,
+                expected
+            );
+            key(&mut app, KeyCode::Enter);
+            assert!(app.settings_form.is_none());
+            assert_eq!(app.settings.library_song_format, expected);
+            assert_eq!(Storage::load(directory.path())?.1, app.settings);
+            assert_eq!(app.library.get(0).unwrap().1, track.as_ref().unwrap());
+            assert_eq!(app.playback.track, track);
+            assert!(app.playback.active);
+            assert_eq!(app.playback.position, 42.0);
+            assert_eq!(commands.try_recv(), Err(TryRecvError::Empty));
+        }
         Ok(())
     }
 

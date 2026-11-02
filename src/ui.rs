@@ -7,7 +7,11 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::app::{App, LibraryRow};
+use crate::{
+    app::{App, LibraryRow},
+    config::LibrarySongFormat,
+    library::Track,
+};
 
 const ACCENT: Color = Color::Cyan;
 const PLAYING: Color = Color::LightGreen;
@@ -474,7 +478,7 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
     }
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let field_count = form.fields.len() + 1;
+    let field_count = form.fields.len() + 2;
     let visible_fields = usize::from(inner.height.saturating_sub(1) / 2).min(field_count);
     let first_field = (form.focus + 1).saturating_sub(visible_fields);
     let last_field = (first_field + visible_fields).min(field_count);
@@ -493,6 +497,7 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
         "Volume step (%)",
         "Related song limit",
         "Show thumbnail",
+        "Library song format",
     ];
     for index in (first_field..last_field)
         .filter(|&index| index != form.focus)
@@ -538,6 +543,8 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 "[{}] Space to toggle",
                 if form.show_thumbnail { "x" } else { " " }
             )
+        } else if index == form.fields.len() + 1 {
+            format!("{} (Space)", form.library_song_format.label())
         } else {
             form.fields[index]
                 .chars()
@@ -573,7 +580,7 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(
         Paragraph::new(form.error.as_deref().unwrap_or(
-            "Blank executable: auto. Seek > 0; volume and songs per artist 1-100. Space toggles the checkbox. Folder changes copy data; executable changes stop playback.",
+            "Blank executable: auto. Seek > 0; volume and songs per artist 1-100. Space toggles the checkbox or cycles song format. Folder changes copy data; executable changes stop playback.",
         )).wrap(Wrap { trim: true }).style(Style::default().fg(
             if form.error.is_some() { Color::LightRed } else { Color::Gray },
         )),
@@ -816,7 +823,12 @@ fn library(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Style::default().fg(Color::White)
                 };
-                items.push(ListItem::new(format!("{marker} {}", track.title)).style(style));
+                let mut line = library_song_title(track, app.settings.library_song_format);
+                if !active && line.spans.len() > 1 {
+                    line.spans[0].style = Style::default().fg(ACCENT);
+                }
+                line.spans.insert(0, Span::raw(format!("{marker} ")));
+                items.push(ListItem::new(line).style(style));
             }
         }
     }
@@ -829,6 +841,21 @@ fn library(frame: &mut Frame, app: &App, area: Rect) {
         area,
         &mut ListState::default().with_selected(selected_row),
     );
+}
+
+fn library_song_title(track: &Track, format: LibrarySongFormat) -> Line<'_> {
+    let suffix = track.metadata.as_ref().and_then(|metadata| match format {
+        LibrarySongFormat::TitleOnly => None,
+        LibrarySongFormat::Album => metadata.album.as_deref(),
+        LibrarySongFormat::Artist => metadata.artist.as_deref(),
+    });
+    match suffix.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => Line::from(vec![
+            Span::raw(track.title.as_str()),
+            Span::styled(format!(" | {value}"), Style::default().fg(Color::Gray)),
+        ]),
+        None => Line::from(track.title.as_str()),
+    }
 }
 
 fn details(frame: &mut Frame, app: &App, area: Rect) {
@@ -1578,6 +1605,134 @@ mod tests {
             let cell = &buffer[(1 + index as u16, 11)];
             assert_eq!(cell.symbol(), character.to_string());
             assert_eq!(cell.fg, Color::Reset);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn library_song_formats_render_saved_titles_and_handle_missing_metadata() -> anyhow::Result<()>
+    {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        let mut metadata = crate::metadata::tests::sample();
+        metadata.album = Some(" LP ".into());
+        metadata.artist = Some(" DJ ".into());
+        app.library
+            .add_resolved("Music", "Saved", "https://youtu.be/one", metadata)?;
+        let original = app.library.get(0).unwrap().1.clone();
+        for (format, expected) in [
+            (LibrarySongFormat::TitleOnly, "Saved"),
+            (LibrarySongFormat::Album, "Saved | LP"),
+            (LibrarySongFormat::Artist, "Saved | DJ"),
+        ] {
+            app.settings.library_song_format = format;
+            assert_eq!(library_song_title(&original, format).to_string(), expected);
+            for (width, height) in [(110, 30), (64, 20)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+                terminal.draw(|frame| draw(frame, &app))?;
+                let content = format!("{}", terminal.backend());
+                assert!(
+                    content.contains(expected),
+                    "Missing {expected} at {width}x{height}"
+                );
+                if format == LibrarySongFormat::TitleOnly {
+                    assert!(!content.contains("Saved |"));
+                }
+            }
+        }
+        assert_eq!(app.library.get(0).unwrap().1, &original);
+        for missing in [None, Some("".into()), Some(" \t ".into())] {
+            let mut track = original.clone();
+            let metadata = track.metadata.as_mut().unwrap();
+            metadata.album = missing.clone();
+            metadata.artist = missing;
+            for format in [LibrarySongFormat::Album, LibrarySongFormat::Artist] {
+                assert_eq!(library_song_title(&track, format).to_string(), "Saved");
+            }
+            track.metadata = None;
+            for format in [LibrarySongFormat::Album, LibrarySongFormat::Artist] {
+                assert_eq!(library_song_title(&track, format).to_string(), "Saved");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn combined_library_titles_and_metadata_have_distinct_colors() -> anyhow::Result<()> {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        let mut metadata = crate::metadata::tests::sample();
+        metadata.album = Some("LP".into());
+        metadata.artist = Some("DJ".into());
+        app.library
+            .add_resolved("Music", "Saved", "https://youtu.be/one", metadata)?;
+        app.library.add("Music", "Other", "https://youtu.be/two")?;
+        app.playback.category = "Music".into();
+        app.playback.track = Some(app.library.get(0).unwrap().1.clone());
+        for format in [LibrarySongFormat::Album, LibrarySongFormat::Artist] {
+            app.settings.library_song_format = format;
+            for (active, paused, title_color) in [
+                (false, false, ACCENT),
+                (true, false, PLAYING),
+                (true, true, Color::Yellow),
+            ] {
+                app.playback.active = active;
+                app.playback.paused = paused;
+                for selected in [0, 1] {
+                    app.selected = selected;
+                    for (width, height) in [(110, 30), (64, 20)] {
+                        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+                        terminal.draw(|frame| draw(frame, &app))?;
+                        let buffer = terminal.backend().buffer();
+                        assert_eq!(buffer[(6, 5)].symbol(), "S");
+                        assert_eq!(buffer[(6, 5)].fg, title_color);
+                        assert_eq!(buffer[(12, 5)].symbol(), "|");
+                        assert_eq!(buffer[(12, 5)].fg, Color::Gray);
+                        assert_eq!(
+                            buffer[(14, 5)].symbol(),
+                            if format == LibrarySongFormat::Album {
+                                "L"
+                            } else {
+                                "D"
+                            }
+                        );
+                        assert_eq!(buffer[(14, 5)].fg, Color::Gray);
+                        if selected == 0 {
+                            assert_eq!(buffer[(6, 5)].bg, Color::DarkGray);
+                            assert_eq!(buffer[(14, 5)].bg, Color::DarkGray);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn library_song_format_setting_scrolls_into_view_at_supported_sizes() -> anyhow::Result<()> {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        for format in [
+            LibrarySongFormat::TitleOnly,
+            LibrarySongFormat::Album,
+            LibrarySongFormat::Artist,
+        ] {
+            app.settings_form.as_mut().unwrap().library_song_format = format;
+            for (width, height) in [(110, 30), (64, 20), (20, 5), (1, 1)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+                terminal.draw(|frame| draw(frame, &app))?;
+                if width >= 64 {
+                    let content = format!("{}", terminal.backend());
+                    assert!(content.contains("Library song format"));
+                    assert!(content.contains(&format!("{} (Space)", format.label())));
+                }
+            }
         }
         Ok(())
     }

@@ -513,6 +513,14 @@ appended at the end of text fields. **Space** toggles a focused checkbox.
   persists across launches. Hidden thumbnails are not downloaded, and Audio
   Details uses the full text width. Existing settings files without this field
   default to thumbnails hidden. Explicitly saved values are preserved.
+- **Library song format:** press **Space** on this field to cycle through
+  **Title only** (default), **Title | Album**, and **Title | Artist**.
+  Press **Enter** to save or **Esc** to discard changes. The library updates
+  immediately without interrupting playback, and the choice persists across launches.
+  The saved song title is unchanged; if the selected metadata is missing or blank,
+  only the title is shown (without a separator). Older settings default to title only.
+  Combined song titles appear in cyan with album and artist suffixes in gray;
+  titles retain their green playing and yellow paused colors.
 
 Use **Tab / Shift+Tab** or **Up / Down** to navigate fields; on small terminals,
 the Settings fields scroll to keep the focused field visible.
@@ -540,9 +548,12 @@ Example `settings.json`:
   "seek_seconds": 10,
   "volume_step": 5,
   "related_song_limit": 5,
-  "show_thumbnail": false
+  "show_thumbnail": false,
+  "library_song_format": "title_only"
 }
 ```
+
+The other `library_song_format` values are `title_album` and `title_artist`.
 
 ## Saved library
 
