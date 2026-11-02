@@ -452,7 +452,7 @@ fn settings_dialog(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let width = area.width.saturating_sub(6).min(88);
-    let height = area.height.min(18);
+    let height = area.height.min(22);
     let popup = Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
@@ -2234,7 +2234,7 @@ mod tests {
             let footer_height = shortcut_lines(ShortcutMode::Settings, width - 2).len() as u16 + 2;
             let body_height = height - 3 - footer_height;
             let popup_x = (width - (width - 6).min(88)) / 2;
-            let popup_y = 3 + (body_height - body_height.min(18)) / 2;
+            let popup_y = 3 + (body_height - body_height.min(22)) / 2;
             let buffer = terminal.backend().buffer();
             assert_eq!(buffer[(popup_x, popup_y)].symbol(), "\u{250c}");
             assert_eq!(buffer[(popup_x, popup_y)].fg, ACCENT);
@@ -2254,6 +2254,52 @@ mod tests {
         assert!(content.contains("Audio details"));
         assert!(content.contains(" Library "));
         assert!(!content.contains("yt-dlp executable"));
+        Ok(())
+    }
+
+    #[test]
+    fn enlarged_settings_shows_every_field_without_scrolling() -> anyhow::Result<()> {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _directory, _commands, _events) = crate::app::tests::fixture();
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        for (width, height) in [(110, 30), (80, 30)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+            let mut original_rows = Vec::new();
+            for focus in 0..8 {
+                app.settings_form.as_mut().unwrap().focus = focus;
+                terminal.draw(|frame| draw(frame, &app))?;
+                let buffer = terminal.backend().buffer();
+                for (index, label) in [
+                    "yt-dlp executable:",
+                    "mpv executable:",
+                    "Data folder:",
+                    "Seek interval (s):",
+                    "Volume step (%):",
+                    "Related song limit:",
+                    "Show thumbnail:",
+                    "Library song format:",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let row = (0..height)
+                        .find(|&y| {
+                            (0..width)
+                                .map(|x| buffer[(x, y)].symbol())
+                                .collect::<String>()
+                                .contains(label)
+                        })
+                        .unwrap_or_else(|| panic!("Missing {label} at focus {focus}"));
+                    if focus == 0 {
+                        original_rows.push(row);
+                    } else {
+                        assert_eq!(row, original_rows[index], "Field scrolled: {label}");
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2282,7 +2328,7 @@ mod tests {
             let footer = shortcut_lines(ShortcutMode::Settings, width - 2).len() as u16 + 2;
             let body_height = height - 3 - footer;
             let popup_x = (width - (width - 6).min(88)) / 2;
-            let popup_y = 3 + (body_height - body_height.min(18)) / 2;
+            let popup_y = 3 + (body_height - body_height.min(22)) / 2;
             let label_x = popup_x + 1;
             let border_x = popup_x + 21;
             let value_x = border_x + 1;
@@ -2314,13 +2360,21 @@ mod tests {
             app.settings_form.as_mut().unwrap().focus = 6;
             terminal.draw(|frame| draw(frame, &app))?;
             let buffer = terminal.backend().buffer();
-            let visible_fields = usize::from(body_height.min(18).saturating_sub(3) / 2).min(7);
-            let last_row = first_row + (visible_fields as u16 - 1) * 2;
+            let visible_fields = usize::from(body_height.min(22).saturating_sub(3) / 2).min(8);
+            let first_field = 7_usize.saturating_sub(visible_fields);
+            let last_row = first_row + (6 - first_field) as u16 * 2;
             assert_eq!(buffer[(value_x, last_row)].bg, Color::DarkGray);
             assert_eq!(buffer[(value_x, last_row)].symbol(), "[");
             assert_eq!(buffer[(value_x + 1, last_row)].symbol(), "x");
             assert!(format!("{}", terminal.backend()).contains("Show thumbnail"));
-            assert_eq!(buffer[(border_x, last_row + 1)].symbol(), "\u{2514}");
+            assert_eq!(
+                buffer[(border_x, last_row + 1)].symbol(),
+                if first_field + visible_fields == 7 {
+                    "\u{2514}"
+                } else {
+                    "\u{251c}"
+                }
+            );
             assert_eq!(buffer[(border_x, last_row + 1)].fg, ACCENT);
             app.handle_key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char(' '),

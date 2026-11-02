@@ -522,8 +522,9 @@ appended at the end of text fields. **Space** toggles a focused checkbox.
   Combined song titles appear in cyan with album and artist suffixes in gray;
   titles retain their green playing and yellow paused colors.
 
-Use **Tab / Shift+Tab** or **Up / Down** to navigate fields; on small terminals,
-the Settings fields scroll to keep the focused field visible.
+Use **Tab / Shift+Tab** or **Up / Down** to navigate fields. The enlarged Settings
+pane shows all eight fields without scrolling when space allows (for example,
+at 110 x 30). On small terminals, fields scroll to keep the focused field visible.
 
 Changing the data folder copies the current library and the new settings to
 the destination and switches future reads/writes there. Old files are kept.
