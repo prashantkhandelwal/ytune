@@ -2701,6 +2701,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn custom_title_add_renders_resolved_library_metadata_without_editing() -> Result<()> {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        for artist in [Some("Artist"), None, Some(" \t ")] {
+            let (mut app, _directory, _commands, _events) = fixture();
+            app.settings.show_thumbnail = false;
+            key(&mut app, KeyCode::Char('a'));
+            app.handle_paste("https://youtu.be/one");
+            key(&mut app, KeyCode::BackTab);
+            app.handle_paste("Custom title");
+            let mut metadata = crate::metadata::tests::sample();
+            metadata.artist = artist.map(str::to_string);
+            app.resolver = Some(Resolver::completed(Ok(metadata.clone())));
+            app.poll_player();
+            assert!(app.form.is_none());
+            assert!(app.edit_form.is_none());
+
+            for reload in [false, true] {
+                if reload {
+                    app.library = Library::load(&app.path)?;
+                }
+                let track = app.library.get(app.selected).unwrap().1;
+                assert_eq!(track.title, "Custom title");
+                assert_eq!(track.metadata.as_ref(), Some(&metadata));
+                for (format, suffix) in [
+                    (LibrarySongFormat::Album, "Album"),
+                    (
+                        LibrarySongFormat::Artist,
+                        if artist == Some("Artist") {
+                            "Artist"
+                        } else {
+                            "Channel"
+                        },
+                    ),
+                ] {
+                    app.settings.library_song_format = format;
+                    let mut terminal = Terminal::new(TestBackend::new(110, 30))?;
+                    terminal.draw(|frame| crate::ui::draw(frame, &app))?;
+                    let expected = format!("Custom title | {suffix}");
+                    assert!(
+                        format!("{}", terminal.backend()).contains(&expected),
+                        "Missing {expected} for artist {artist:?}, reload {reload}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn resolved_metadata_is_saved_and_failures_keep_form_open() -> Result<()> {
         let (mut app, _directory, _commands, _events) = fixture();
         key(&mut app, KeyCode::Char('a'));

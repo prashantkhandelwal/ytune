@@ -847,7 +847,7 @@ fn library_song_title(track: &Track, format: LibrarySongFormat) -> Line<'_> {
     let suffix = track.metadata.as_ref().and_then(|metadata| match format {
         LibrarySongFormat::TitleOnly => None,
         LibrarySongFormat::Album => metadata.album.as_deref(),
-        LibrarySongFormat::Artist => metadata.artist.as_deref(),
+        LibrarySongFormat::Artist => Some(metadata.artist_label()),
     });
     match suffix.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => Line::from(vec![
@@ -1647,6 +1647,11 @@ mod tests {
             let metadata = track.metadata.as_mut().unwrap();
             metadata.album = missing.clone();
             metadata.artist = missing;
+            assert_eq!(
+                library_song_title(&track, LibrarySongFormat::Artist).to_string(),
+                "Saved | Channel"
+            );
+            track.metadata.as_mut().unwrap().uploader = None;
             for format in [LibrarySongFormat::Album, LibrarySongFormat::Artist] {
                 assert_eq!(library_song_title(&track, format).to_string(), "Saved");
             }

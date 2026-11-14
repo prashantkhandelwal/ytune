@@ -517,8 +517,11 @@ appended at the end of text fields. **Space** toggles a focused checkbox.
   **Title only** (default), **Title | Album**, and **Title | Artist**.
   Press **Enter** to save or **Esc** to discard changes. The library updates
   immediately without interrupting playback, and the choice persists across launches.
-  The saved song title is unchanged; if the selected metadata is missing or blank,
-  only the title is shown (without a separator). Older settings default to title only.
+  The saved song title (including a custom title) is unchanged. Artist display
+  falls back to the saved uploader when the artist is missing or blank, just as
+  Audio Details does, without needing to edit the track first. If the album or
+  both artist and uploader are missing or blank, only the title is shown (without
+  a separator). Older settings default to title only.
   Combined song titles appear in cyan with album and artist suffixes in gray;
   titles retain their green playing and yellow paused colors.
 
